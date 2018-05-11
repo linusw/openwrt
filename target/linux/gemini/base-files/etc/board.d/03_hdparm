@@ -1,0 +1,14 @@
+#!/bin/sh
+
+# Enables spin-down of the hard drive when not in
+# use, if the hdparm utility from Busybox is installed.
+
+which hdparm > /dev/null
+if [ ! $? -eq 0 ] ; then
+	exit 0
+fi
+
+# Spin down after 1 minute if inactive
+if [ -b /dev/sda ] ; then
+	hdparm -S 12 /dev/sda > /dev/null
+fi
