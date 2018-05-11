@@ -1,0 +1,15 @@
+#!/bin/sh
+# Spin down drives after one minute if inactive
+
+which hdparm > /dev/null
+if [ ! $? -eq 0 ] ; then
+	exit 0
+fi
+
+DISKS=`find /dev/sd[a-z] 2>/dev/null`
+for DISK in $DISKS
+do
+	if [ -b $DISK ] ; then
+		hdparm -S 12 /dev/sda > /dev/null
+	fi
+done
