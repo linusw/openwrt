@@ -1,0 +1,9 @@
+#!/bin/sh
+
+# OpenWRT splash screen if using framebuffer console
+if [ ! -d /sys/class/graphics/fbcon ] ; then
+	exit 0
+fi
+
+echo 0 > /sys/class/graphics/fbcon/cursor_blink
+cat /etc/banner > /dev/tty0
