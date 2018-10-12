@@ -1,0 +1,38 @@
+#!/bin/sh
+
+. /lib/functions/uci-defaults.sh
+
+board_config_update
+
+board=$(board_name)
+
+# We assume eth0 and eth1 are already up here.
+# This brings up the DSA switches by simply doing an ifup
+# on all interfaces on the DSA.
+
+case "$board" in
+storlink,gemini324)
+	# These are all connected to eth1 thru VSC7385
+	ucidef_set_interfaces_lan_wan "eth1 lan1 lan2 lan3 lan4" "eth0"
+	ifconfig eth1 up
+	ifconfig lan1 up
+	ifconfig lan2 up
+	ifconfig lan3 up
+	ifconfig lan4 up
+	;;
+itian,sq201)
+	# These are all connected to eth1 thru VSC7395x
+	ucidef_set_interfaces_lan_wan "eth1 lan1 lan2 lan3 lan4" "eth0"
+	ifconfig eth1 up
+	ifconfig lan1 up
+	ifconfig lan2 up
+	ifconfig lan3 up
+	ifconfig lan4 up
+	;;
+dlink,dir-685)
+	# These are all connected to eth0 thru RTL8366RB
+	ucidef_set_interfaces_lan_wan "lan0 lan1 lan2 lan3" "wan"
+	;;
+esac
+
+exit 0
