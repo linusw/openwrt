@@ -39,14 +39,14 @@ define Build/dns313-images
 	if [ -d $(BIN_DIR)/.boot ] ; then rm -rf $(BIN_DIR)/.boot ; fi
 endef
 
-# Create the special NAS4220B and Itian Square One SQ201 image
+# Create the special NAS4220B, SL93512r and Itian Square One SQ201 image
 # format with the squashfs and overlay inside the "rd.gz" file.
 # We pad it out to 6144K which is the size of the initramfs partition.
 #
 # The "application" partition is just blank. You can put anything
 # there when using OpenWRT. We just use that to create the
 # "sysupgrade" firmware image.
-define Build/nas4220b-sq201-images
+define Build/nas4220b-sl93512r-sq201-images
 	rm -rf $@-tmp
 	mkdir -p $@-tmp
 	dd if=$(IMAGE_ROOTFS) of=$@-tmp/rd.gz bs=6144k conv=sync
@@ -107,20 +107,26 @@ define Device/dlink-dns-313
 endef
 TARGET_DEVICES += dlink-dns-313
 
-define Device/nas4220b-sq201
+define Device/nas4220b-sl93512r-sq201
 	ARTIFACTS := zImage
 	ARTIFACT/zImage := append-kernel
 	IMAGES += rd.gz sysupgrade.tar.gz
 	IMAGE/rd.gz := append-rootfs | pad-to 6144k
-	IMAGE/sysupgrade.tar.gz := nas4220b-sq201-images $(1)
+	IMAGE/sysupgrade.tar.gz := nas4220b-sl93512r-sq201-images $(1)
 	DEVICE_PACKAGES := $(GEMINI_NAS_PACKAGES)
 endef
 
 define Device/nas4220b
-	$(Device/nas4220b-sq201)
+	$(Device/nas4220b-sl93512r-sq201)
 	DEVICE_TITLE := Raidsonic NAS IB-4220-B
 endef
 TARGET_DEVICES += nas4220b
+
+define Device/sl93512r
+	$(Device/nas4220b-sl93512r-sq201)
+	DEVICE_TITLE := StorLink SL93512R Reference Design
+endef
+TARGET_DEVICES += sl93512r
 
 define Device/rut1xx
 	DEVICE_TITLE := Teltonika RUT1xx
@@ -129,7 +135,7 @@ endef
 TARGET_DEVICES += rut1xx
 
 define Device/sq201
-	$(Device/nas4220b-sq201)
+	$(Device/nas4220b-sl93512r-sq201)
 	DEVICE_TITLE := ITian Square One SQ201
 	DEVICE_PACKAGES += rt61-pci usb2-pci
 endef
