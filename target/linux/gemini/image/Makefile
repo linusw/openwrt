@@ -93,7 +93,6 @@ GEMINI_NAS_PACKAGES:=kmod-md-mod kmod-md-linear kmod-md-multipath \
 define Device/dlink-dir-685
 	DEVICE_TITLE := D-Link DIR-685 Xtreme N Storage Router
 	DEVICE_PACKAGES := $(GEMINI_NAS_PACKAGES) \
-			kmod-switch-rtl8366rb swconfig \
 			rt2800-pci
 	IMAGES += dir685-image
 	IMAGE/dir685-image := dir685-images
