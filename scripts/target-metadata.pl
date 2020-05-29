@@ -244,6 +244,12 @@ EOF
 				print "\tselect DEFAULT_$pkg\n";
 				$defaults{$pkg} = 1;
 			}
+			if ($profile->{device_type} =~ "router") {
+				print "\tselect DEVICE_TYPE_ROUTER\n";
+			}
+			if ($profile->{device_type} =~ "nas") {
+				print "\tselect DEVICE_TYPE_NAS\n";
+			}
 			my $help = $profile->{desc};
 			if ($help =~ /\w+/) {
 				$help =~ s/^\s*/\t  /mg;
@@ -326,6 +332,12 @@ config HAS_SUBTARGETS
 	bool
 
 config HAS_DEVICES
+	bool
+
+config DEVICE_TYPE_ROUTER
+	bool
+
+config DEVICE_TYPE_NAS
 	bool
 
 config TARGET_BOARD

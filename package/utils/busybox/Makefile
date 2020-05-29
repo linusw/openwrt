@@ -94,7 +94,7 @@ endif
 define Build/Configure
 	rm -f $(PKG_BUILD_DIR)/.config
 	touch $(PKG_BUILD_DIR)/.config
-ifeq ($(DEVICE_TYPE),nas)
+ifeq ($(CONFIG_DEVICE_TYPE_NAS),y)
 	echo "CONFIG_HDPARM=y" >> $(PKG_BUILD_DIR)/.config
 endif
 	grep 'CONFIG_BUSYBOX_$(BUSYBOX_SYM)' $(TOPDIR)/.config | sed -e "s,\\(# \)\\?CONFIG_BUSYBOX_$(BUSYBOX_SYM)_\\(.*\\),\\1CONFIG_\\2,g" >> $(PKG_BUILD_DIR)/.config
