@@ -47,11 +47,11 @@
 			};
 			partition@60000 {
 				label = "kernel";
-				reg = <0x60000 0x300000>;
+				reg = <0x60000 0x400000>;
 			};
-			partition@360000 {
+			partition@460000 {
 				label = "ubi";
-				reg = <0x360000 0x7ca0000>;
+				reg = <0x460000 0x7ba0000>;
 			};
 		};
 	};
