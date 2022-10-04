@@ -270,6 +270,10 @@ define Device/zyxel_p-2812hnu-f1
   BOARD_NAME := P2812HNUF1
   DEVICE_PACKAGES := kmod-rt2800-pci wpad-basic-wolfssl kmod-usb-dwc2 kmod-usb-ledtrig-usbport
   KERNEL_SIZE := 3072k
+  KERNEL_NAME := vmlinuz
+  KERNEL_INITRAMFS_NAME := vmlinuz-initramfs
+  KERNEL := kernel-bin | append-dtb-elf | uImage none
+  KERNEL_INITRAMFS := kernel-bin | append-dtb-elf | uImage none
   SUPPORTED_DEVICES += P2812HNUF1
 endef
 TARGET_DEVICES += zyxel_p-2812hnu-f1

@@ -3,6 +3,9 @@ SUBTARGET:=xrx200
 BOARDNAME:=XRX200
 FEATURES+=atm nand ramdisk
 CPU_TYPE:=24kc
+KERNELNAME := vmlinux vmlinuz dtbs
+# make Kernel/CopyImage use $LINUX_DIR/vmlinuz
+IMAGES_DIR:=../../..
 
 DEFAULT_PACKAGES+=kmod-leds-gpio \
 	kmod-gpio-button-hotplug \
