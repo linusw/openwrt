@@ -266,6 +266,14 @@ define Device/dlink_dir-885l
 endef
 TARGET_DEVICES += dlink_dir-885l
 
+define Device/dlink_dir-890l
+  DEVICE_MODEL := DIR-890L
+  DEVICE_PACKAGES := $(BRCMFMAC_4366B1) $(USB2_PACKAGES) $(USB3_PACKAGES)
+  $(Device/dlink)
+  SIGNATURE := wrgac36_dlink.2013gui_dir890
+endef
+TARGET_DEVICES += dlink_dir-890l
+
 define Device/dlink_dwl-8610ap
   DEVICE_VENDOR := D-Link
   DEVICE_MODEL := DWL-8610AP
