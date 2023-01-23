@@ -1,4 +1,4 @@
-From 7166207bd1d8c46d09d640d46afc685df9bb9083 Mon Sep 17 00:00:00 2001
+From a054e2fe2d00bd32f308986de654b66f054083d2 Mon Sep 17 00:00:00 2001
 From: =?UTF-8?q?Rafa=C5=82=20Mi=C5=82ecki?= <rafal@milecki.pl>
 Date: Thu, 22 Nov 2018 09:21:49 +0100
 Subject: [PATCH] ARM: dts: BCM5301X: Describe partition formats
@@ -11,7 +11,8 @@ It's needed by OpenWrt for custom partitioning.
 Signed-off-by: Rafał Miłecki <rafal@milecki.pl>
 ---
  arch/arm/boot/dts/bcm47094-dlink-dir-885l.dts | 1 +
- 1 file changed, 1 insertion(+)
+ arch/arm/boot/dts/bcm47094-dlink-dir-890l.dts | 1 +
+ 2 files changed, 2 insertions(+)
 
 --- a/arch/arm/boot/dts/bcm47094-dlink-dir-885l.dts
 +++ b/arch/arm/boot/dts/bcm47094-dlink-dir-885l.dts
@@ -23,3 +24,13 @@ Signed-off-by: Rafał Miłecki <rafal@milecki.pl>
  				};
  			};
  		};
+--- a/arch/arm/boot/dts/bcm47094-dlink-dir-890l.dts
++++ b/arch/arm/boot/dts/bcm47094-dlink-dir-890l.dts
+@@ -151,6 +151,7 @@
+ 		firmware@0 {
+ 			label = "firmware";
+ 			reg = <0x00000000 0x08000000>;
++			compatible = "seama";
+ 		};
+ 	};
+ };
