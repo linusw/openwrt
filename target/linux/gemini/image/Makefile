@@ -168,7 +168,7 @@ define Device/dlink_dns-313
 	DEVICE_VENDOR := D-Link
 	DEVICE_MODEL := DNS-313 1-Bay Network Storage Enclosure
 	DEVICE_DTS := gemini-dlink-dns-313
-	DEVICE_PACKAGES := $(GEMINI_NAS_PACKAGES)
+	DEVICE_PACKAGES := $(GEMINI_NAS_PACKAGES) kmod-usb-gadget kmod-usb-gadget-serial
 	BLOCKSIZE := 1k
 	FILESYSTEMS := ext4
 	IMAGES := factory.bin.gz
