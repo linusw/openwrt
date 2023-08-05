@@ -40,7 +40,7 @@ endef
 TARGET_DEVICES += comtrend_ar-5387un
 
 define Device/inteno_xg6846
-  $(Device/bcm63xx-cfe-legacy)
+  $(Device/bcm63xx-cfe-uboot)
   DEVICE_VENDOR := Inteno
   DEVICE_MODEL := XG6846
   CHIP_ID := 6328
