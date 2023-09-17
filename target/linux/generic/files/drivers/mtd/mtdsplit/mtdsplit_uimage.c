@@ -217,11 +217,22 @@ static int __mtdsplit_parse_uimage(struct mtd_info *master,
 		if (ret) {
 			pr_debug("no rootfs before uImage in \"%s\"\n",
 				 master->name);
-			goto err_free_buf;
-		}
 
-		rootfs_offset = 0;
-		rootfs_size = uimage_offset;
+			/* Try after the uImage */
+			ret = mtd_find_rootfs_from(master, uimage_offset + uimage_size,
+						   master->size, &rootfs_offset, &type);
+			if (ret) {
+				pr_debug("no rootfs after uImage either in \"%s\"\n",
+					 master->name);
+				goto err_free_buf;
+			}
+
+			rootfs_size = master->size - rootfs_offset;
+			uimage_size = rootfs_offset - uimage_offset;
+		} else {
+			rootfs_offset = 0;
+			rootfs_size = uimage_offset;
+		}
 	}
 
 	if (rootfs_size == 0) {
