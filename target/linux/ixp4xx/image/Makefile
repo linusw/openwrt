@@ -62,6 +62,7 @@ TARGET_DEVICES += cambria
 define Device/nslu2
 	DEVICE_VENDOR := Linksys
 	DEVICE_MODEL := NSLU2
+	# USB2 is compiled in and needs no package
 	DEVICE_PACKAGES := apex ixp4xx-microcode-ethernet kmod-rtc-x1205
 	# Only 32 MB of RAM so not building by default
 	DEFAULT := n
@@ -72,5 +73,18 @@ define Device/nslu2
 	IMAGE/factory.bin := append-kernel | linksys-ixp425-image "nslu2"
 endef
 TARGET_DEVICES += nslu2
+
+define Device/usr8200
+	DEVICE_VENDOR := USRobotics
+	DEVICE_MODEL := USR8200
+	# USB2 is compiled in and needs no package
+	DEVICE_PACKAGES := ixp4xx-microcode-ethernet kmod-rtc-r7301 kmod-firewire kmod-firewire-ohci
+	DEVICE_DTS := intel-ixp42x-usrobotics-usr8200
+	KERNEL := kernel-bin | append-dtb
+	IMAGES := kernel.bin rootfs.bin
+	IMAGE/kernel.bin := append-kernel
+	IMAGE/rootfs.bin := append-rootfs | pad-rootfs | pad-to 128k
+endef
+TARGET_DEVICES += usr8200
 
 $(eval $(call BuildImage))
