@@ -1,0 +1,369 @@
+From be5229b2a8801b232dd53f5347a120d602fa473e Mon Sep 17 00:00:00 2001
+From: Linus Walleij <linusw@kernel.org>
+Date: Tue, 13 Oct 2026 22:09:44 +0200
+Subject: [PATCH] mfd: Add a shared BCMBCA PMC3 PMB transport
+
+Add an MFD driver for shared access to the Processor Monitor Bus (PMB)
+of the third generation Power Management Controller (PMC3), initially
+for BCM6846.
+
+Serialize complete register sequences with a mutex and the keyhole
+hardware lock. Select clock, reset and PVTMON hwmon MFD cells from the
+SoC match data and associate each cell with its child DT compatible.
+Remove the children before stopping the transport or releasing its
+register mapping.
+
+A software timeout does not abort a transaction. If the keyhole is still
+busy, retain its hardware lock and reject new callers until delayed work
+observes completion and releases it.
+
+Build this fixed SoC transport into the kernel and suppress sysfs
+bind/unbind controls. The child drivers can remain modular. Runtime
+removal of the PMB platform device is unsupported.
+
+The keyhole register layout differs from older Broadcom PMB controllers.
+Match only BCM6846 for now.
+
+Signed-off-by: Linus Walleij <linusw@kernel.org>
+
+---
+diff --git a/drivers/mfd/Kconfig b/drivers/mfd/Kconfig
+index 55a9fea95195..b92638154547 100644
+--- a/drivers/mfd/Kconfig
++++ b/drivers/mfd/Kconfig
+@@ -172,6 +172,20 @@ config MFD_ATMEL_SMC
+ 	bool
+ 	select MFD_SYSCON
+ 
++config MFD_BCMBCA_PMB
++	bool "Broadcom BCMBCA Processor Monitor Bus"
++	depends on ARCH_BCMBCA || COMPILE_TEST
++	depends on OF
++	select MFD_CORE
++	help
++	  Provide shared Processor Monitor Bus (PMB) access through the third
++	  generation Power Management Controller (PMC3), initially on
++	  BCM6846. Register MFD cells for functions such as coordinated resets.
++	  Firmware must power the target blocks first.
++
++	  This fixed SoC transport is built-in and cannot be unbound through
++	  sysfs, so recovery can retain ownership of an active transaction.
++
+ config MFD_BCM590XX
+ 	tristate "Broadcom BCM590xx PMUs"
+ 	select MFD_CORE
+diff --git a/drivers/mfd/Makefile b/drivers/mfd/Makefile
+index 865e9f12faff..ef07346e13f7 100644
+--- a/drivers/mfd/Makefile
++++ b/drivers/mfd/Makefile
+@@ -11,6 +11,7 @@ obj-$(CONFIG_MFD_88PM886_PMIC)	+= 88pm886.o
+ obj-$(CONFIG_MFD_ACT8945A)	+= act8945a.o
+ obj-$(CONFIG_MFD_SM501)		+= sm501.o
+ obj-$(CONFIG_ARCH_BCM2835)	+= bcm2835-pm.o
++obj-$(CONFIG_MFD_BCMBCA_PMB)	+= bcmbca_pmc3_pmb.o
+ obj-$(CONFIG_MFD_BCM590XX)	+= bcm590xx.o
+ obj-$(CONFIG_MFD_BD9571MWV)	+= bd9571mwv.o
+ obj-$(CONFIG_MFD_BQ257XX)	+= bq257xx.o
+diff --git a/drivers/mfd/bcmbca_pmc3_pmb.c b/drivers/mfd/bcmbca_pmc3_pmb.c
+new file mode 100644
+index 000000000000..70bc92e0c5f9
+--- /dev/null
++++ b/drivers/mfd/bcmbca_pmc3_pmb.c
+@@ -0,0 +1,266 @@
++// SPDX-License-Identifier: GPL-2.0-or-later
++/*
++ * Broadcom BCMBCA Processor Monitor Bus (PMB) transport for the third
++ * generation Power Management Controller (PMC3).
++ *
++ * The bus child of the PMC complex supplies the PMB register bank.
++ * Children share keyhole 0 and hold its software and hardware locks across
++ * complete sequences. A software timeout does not abort a PMB transaction:
++ * keep the hardware lock until completion, even after returning an error.
++ * Module removal and sysfs unbind are not supported for this fixed SoC
++ * transport, allowing recovery to wait for delayed transaction completion.
++ */
++
++#include <linux/bitfield.h>
++#include <linux/io.h>
++#include <linux/iopoll.h>
++#include <linux/ioport.h>
++#include <linux/log2.h>
++#include <linux/mfd/bcmbca-pmb.h>
++#include <linux/mfd/core.h>
++#include <linux/mod_devicetable.h>
++#include <linux/module.h>
++#include <linux/mutex.h>
++#include <linux/platform_device.h>
++#include <linux/property.h>
++#include <linux/workqueue.h>
++
++#define PMB_CONFIG		0x00
++#define PMB_REGS_PER_DEVICE	GENMASK(29, 20)
++#define PMB_CONTROL		0x10
++#define PMB_WRITE_DATA		0x14
++#define PMB_MUTEX		0x18
++#define PMB_READ_DATA		0x1c
++#define PMB_START		BIT(31)
++#define PMB_TIMEOUT		BIT(30)
++#define PMB_SLAVE_ERROR		BIT(29)
++#define PMB_BUSY			BIT(28)
++#define PMB_WRITE		BIT(24)
++#define PMB_BUS			GENMASK(21, 20)
++#define PMB_LOCKED		BIT(0)
++
++struct bcmbca_pmb {
++	struct device *dev;
++	void __iomem *base;
++	/* Serializes register sequences and recovery state. */
++	struct mutex lock;
++	struct delayed_work recovery;
++	u32 regs_per_device;
++	bool recovering;
++	bool stopping;
++};
++
++static struct platform_driver bcmbca_pmb_driver;
++
++struct bcmbca_pmb_data {
++	const struct mfd_cell *cells;
++	unsigned int num_cells;
++};
++
++/* Only children registered by this provider may borrow its transport. */
++struct bcmbca_pmb *bcmbca_pmb_get(struct device *dev)
++{
++	if (!dev->parent || dev->parent->driver != &bcmbca_pmb_driver.driver)
++		return ERR_PTR(-ENODEV);
++
++	return dev_get_drvdata(dev->parent);
++}
++EXPORT_SYMBOL_GPL(bcmbca_pmb_get);
++
++static void bcmbca_pmb_recover(struct work_struct *work)
++{
++	struct bcmbca_pmb *pmb = container_of(to_delayed_work(work),
++					   struct bcmbca_pmb, recovery);
++
++	mutex_lock(&pmb->lock);
++	if (!pmb->stopping) {
++		if (readl(pmb->base + PMB_CONTROL) & PMB_BUSY) {
++			queue_delayed_work(system_dfl_wq, &pmb->recovery,
++					   msecs_to_jiffies(100));
++		} else {
++			writel(PMB_LOCKED, pmb->base + PMB_MUTEX);
++			pmb->recovering = false;
++		}
++	}
++	mutex_unlock(&pmb->lock);
++}
++
++int bcmbca_pmb_lock(struct bcmbca_pmb *pmb)
++{
++	u32 value;
++	int ret;
++
++	mutex_lock(&pmb->lock);
++	if (pmb->stopping) {
++		ret = -ENODEV;
++		goto unlock;
++	}
++	if (pmb->recovering) {
++		ret = -EBUSY;
++		goto unlock;
++	}
++
++	/* Reading bit 0 acquires the hardware lock; writing 1 releases it. */
++	ret = readl_poll_timeout(pmb->base + PMB_MUTEX, value,
++				 value & PMB_LOCKED, 1, 1000);
++	if (!ret)
++		return 0;
++unlock:
++	mutex_unlock(&pmb->lock);
++	return ret;
++}
++EXPORT_SYMBOL_GPL(bcmbca_pmb_lock);
++
++void bcmbca_pmb_unlock(struct bcmbca_pmb *pmb)
++{
++	lockdep_assert_held(&pmb->lock);
++	if (readl(pmb->base + PMB_CONTROL) & PMB_BUSY) {
++		pmb->recovering = true;
++		dev_err(pmb->dev, "PMB keyhole still busy; deferring unlock\n");
++		queue_delayed_work(system_dfl_wq, &pmb->recovery,
++				   msecs_to_jiffies(100));
++	} else {
++		writel(PMB_LOCKED, pmb->base + PMB_MUTEX);
++	}
++	mutex_unlock(&pmb->lock);
++}
++EXPORT_SYMBOL_GPL(bcmbca_pmb_unlock);
++
++static int bcmbca_pmb_op(struct bcmbca_pmb *pmb, u8 bus, u8 device,
++			 u16 offset, u32 *value, bool write)
++{
++	u32 status, command;
++	int ret;
++
++	lockdep_assert_held(&pmb->lock);
++	if (bus > FIELD_MAX(PMB_BUS) || offset >= pmb->regs_per_device)
++		return -EINVAL;
++
++	ret = readl_poll_timeout(pmb->base + PMB_CONTROL, status,
++				 !(status & PMB_BUSY), 1, 1000);
++	if (ret)
++		return ret;
++	command = PMB_START | FIELD_PREP(PMB_BUS, bus) |
++		  (device * pmb->regs_per_device) | offset;
++	if (write) {
++		writel(*value, pmb->base + PMB_WRITE_DATA);
++		command |= PMB_WRITE;
++	}
++	writel(command, pmb->base + PMB_CONTROL);
++	ret = readl_poll_timeout(pmb->base + PMB_CONTROL, status,
++				 !(status & PMB_BUSY), 1, 1000);
++	if (ret || status & PMB_TIMEOUT)
++		return -ETIMEDOUT;
++	if (status & PMB_SLAVE_ERROR)
++		return -EIO;
++	if (!write)
++		*value = readl(pmb->base + PMB_READ_DATA);
++	return 0;
++}
++
++int bcmbca_pmb_read(struct bcmbca_pmb *pmb, u8 bus, u8 device,
++		    u16 offset, u32 *value)
++{
++	return bcmbca_pmb_op(pmb, bus, device, offset, value, false);
++}
++EXPORT_SYMBOL_GPL(bcmbca_pmb_read);
++
++int bcmbca_pmb_write(struct bcmbca_pmb *pmb, u8 bus, u8 device,
++		     u16 offset, u32 value)
++{
++	return bcmbca_pmb_op(pmb, bus, device, offset, &value, true);
++}
++EXPORT_SYMBOL_GPL(bcmbca_pmb_write);
++
++/* Children are removed before this action, while MMIO is still mapped. */
++static void bcmbca_pmb_stop(void *data)
++{
++	struct bcmbca_pmb *pmb = data;
++
++	mutex_lock(&pmb->lock);
++	pmb->stopping = true;
++	mutex_unlock(&pmb->lock);
++	cancel_delayed_work_sync(&pmb->recovery);
++
++	if (pmb->recovering) {
++		if (readl(pmb->base + PMB_CONTROL) & PMB_BUSY)
++			dev_err(pmb->dev, "PMB keyhole remains busy; hardware reset required\n");
++		else
++			writel(PMB_LOCKED, pmb->base + PMB_MUTEX);
++	}
++}
++
++static int bcmbca_pmb_probe(struct platform_device *pdev)
++{
++	struct device *dev = &pdev->dev;
++	const struct bcmbca_pmb_data *data = device_get_match_data(dev);
++	struct bcmbca_pmb *pmb;
++	struct resource *res;
++	int ret;
++
++	pmb = devm_kzalloc(dev, sizeof(*pmb), GFP_KERNEL);
++	if (!pmb)
++		return -ENOMEM;
++	pmb->dev = dev;
++	pmb->base = devm_platform_get_and_ioremap_resource(pdev, 0, &res);
++	if (IS_ERR(pmb->base))
++		return PTR_ERR(pmb->base);
++	if (resource_size(res) < PMB_READ_DATA + sizeof(u32))
++		return dev_err_probe(dev, -EINVAL, "PMB register range is too small\n");
++	pmb->regs_per_device = FIELD_GET(PMB_REGS_PER_DEVICE,
++					 readl(pmb->base + PMB_CONFIG));
++	if (!is_power_of_2(pmb->regs_per_device))
++		return dev_err_probe(dev, -EINVAL, "invalid PMB register stride\n");
++	mutex_init(&pmb->lock);
++	INIT_DELAYED_WORK(&pmb->recovery, bcmbca_pmb_recover);
++	ret = devm_add_action_or_reset(dev, bcmbca_pmb_stop, pmb);
++	if (ret)
++		return ret;
++	platform_set_drvdata(pdev, pmb);
++	ret = devm_mfd_add_devices(dev, PLATFORM_DEVID_AUTO, data->cells,
++				   data->num_cells, NULL, 0, NULL);
++	if (ret)
++		return dev_err_probe(dev, ret,
++				     "failed to register PMB functions\n");
++
++	return 0;
++}
++
++static const struct mfd_cell bcm6846_pmb_cells[] = {
++	{
++		.name = "bcm6846-pmb-clock",
++		.of_compatible = "brcm,bcm6846-pmb-clock",
++	},
++	{
++		.name = "bcm6846-pmb-reset",
++		.of_compatible = "brcm,bcm6846-pmb-reset",
++	},
++	{
++		.name = "bcm6846-pmb-pvtmon",
++		.of_compatible = "brcm,bcm6846-pmb-pvtmon",
++	},
++};
++
++static const struct bcmbca_pmb_data bcm6846_pmb_data = {
++	.cells = bcm6846_pmb_cells,
++	.num_cells = ARRAY_SIZE(bcm6846_pmb_cells),
++};
++
++static const struct of_device_id bcmbca_pmb_match[] = {
++	{ .compatible = "brcm,bcm6846-pmb", .data = &bcm6846_pmb_data },
++	{ }
++};
++MODULE_DEVICE_TABLE(of, bcmbca_pmb_match);
++
++static struct platform_driver bcmbca_pmb_driver = {
++	.probe = bcmbca_pmb_probe,
++	.driver = {
++		.name = "bcmbca-pmb",
++		.of_match_table = bcmbca_pmb_match,
++		.suppress_bind_attrs = true,
++	},
++};
++builtin_platform_driver(bcmbca_pmb_driver);
++
++MODULE_DESCRIPTION("Broadcom BCMBCA Processor Monitor Bus transport for PMC3");
++MODULE_LICENSE("GPL");
+diff --git a/include/linux/mfd/bcmbca-pmb.h b/include/linux/mfd/bcmbca-pmb.h
+new file mode 100644
+index 000000000000..6f0eec0c00b5
+--- /dev/null
++++ b/include/linux/mfd/bcmbca-pmb.h
+@@ -0,0 +1,25 @@
++/* SPDX-License-Identifier: GPL-2.0-only */
++#ifndef __LINUX_MFD_BCMBCA_PMB_H
++#define __LINUX_MFD_BCMBCA_PMB_H
++
++#include <linux/types.h>
++
++struct device;
++struct bcmbca_pmb;
++
++/* The parent MFD device owns the Processor Monitor Bus (PMB) transport. */
++struct bcmbca_pmb *bcmbca_pmb_get(struct device *dev);
++
++/*
++ * Processor Monitor Bus (PMB) operations sleep. Hold the transport lock
++ * across a complete sequence, including read/modify/write operations.
++ * A successful lock must be paired with unlock, including on errors.
++ */
++int bcmbca_pmb_lock(struct bcmbca_pmb *pmb);
++void bcmbca_pmb_unlock(struct bcmbca_pmb *pmb);
++int bcmbca_pmb_read(struct bcmbca_pmb *pmb, u8 bus, u8 device,
++		    u16 offset, u32 *value);
++int bcmbca_pmb_write(struct bcmbca_pmb *pmb, u8 bus, u8 device,
++		     u16 offset, u32 value);
++
++#endif

@@ -1,0 +1,32 @@
+#!/bin/sh
+# SPDX-License-Identifier: GPL-2.0-only
+
+. /lib/functions.sh
+. /lib/functions/system.sh
+. /lib/functions/uci-defaults.sh
+
+board_config_update
+
+case "$(board_name)" in
+genexis,xg6846b)
+	ucidef_set_interfaces_lan_wan "eth0 eth1 eth2 eth3" "eth4 sfp"
+	loader="$(find_mtd_chardev loader)"
+	if [ -n "$loader" ]; then
+		for port in 0 1 2 3 4; do
+			mac="$(bcmbca-nvram "$loader" "$port")" || continue
+			ucidef_set_network_device_mac "eth$port" "$mac"
+			[ "$port" != 4 ] || {
+				ucidef_set_network_device_mac sfp "$mac"
+				ucidef_set_interface_macaddr wan "$mac"
+			}
+		done
+		mac="$(bcmbca-nvram "$loader" 0)" && {
+			ucidef_set_interface_macaddr lan "$mac"
+			ucidef_set_label_macaddr "$mac"
+		}
+	fi
+	;;
+esac
+
+board_config_flush
+exit 0

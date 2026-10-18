@@ -1,0 +1,169 @@
+From 509383f36978051aa166706b719f451c0370fff5 Mon Sep 17 00:00:00 2001
+From: Linus Walleij <linusw@kernel.org>
+Date: Tue, 13 Oct 2026 19:05:50 +0200
+Subject: [PATCH] net: broadcom: Add KUnit tests for BCMBCA XRDP Ethernet
+
+Test receive descriptor validation against the buffer and port limits
+of each SoC variant, transmit descriptor packing, and eight-bit packet
+credit counter wraparound. Exercise malformed receive descriptors and
+check that length updates preserve the transmit buffer count.
+
+The tests run without XRDP hardware and can be enabled independently
+of the Ethernet driver with CONFIG_BCMBCA_XRDP_ETH_KUNIT_TEST.
+
+Signed-off-by: Linus Walleij <linusw@kernel.org>
+
+---
+diff --git a/drivers/net/ethernet/broadcom/Kconfig b/drivers/net/ethernet/broadcom/Kconfig
+index b159e7e21d01..b31e58f92e2e 100644
+--- a/drivers/net/ethernet/broadcom/Kconfig
++++ b/drivers/net/ethernet/broadcom/Kconfig
+@@ -86,6 +86,14 @@ config BCMBCA_XRDP_ETH
+ 
+ 	  The module will be called bcmbca_xrdp.
+ 
++config BCMBCA_XRDP_ETH_KUNIT_TEST
++	tristate "KUnit tests for BCMBCA XRDP descriptors" if !KUNIT_ALL_TESTS
++	depends on KUNIT
++	default KUNIT_ALL_TESTS
++	help
++	  Test receive descriptor validation, transmit descriptor packing,
++	  and the eight-bit packet credit counters used by reduced XRDP.
++
+ config BCMGENET
+ 	tristate "Broadcom GENET internal MAC support"
+ 	depends on HAS_IOMEM
+diff --git a/drivers/net/ethernet/broadcom/Makefile b/drivers/net/ethernet/broadcom/Makefile
+index 7f0d77ce0873..d4ea37aee841 100644
+--- a/drivers/net/ethernet/broadcom/Makefile
++++ b/drivers/net/ethernet/broadcom/Makefile
+@@ -7,6 +7,7 @@ obj-$(CONFIG_B44) += b44.o
+ obj-$(CONFIG_BCM4908_ENET) += bcm4908_enet.o
+ obj-$(CONFIG_BCM63XX_ENET) += bcm63xx_enet.o
+ obj-$(CONFIG_BCMBCA_XRDP_ETH) += bcmbca_xrdp.o
++obj-$(CONFIG_BCMBCA_XRDP_ETH_KUNIT_TEST) += bcmbca_xrdp_test.o
+ obj-$(CONFIG_BCMGENET) += genet/
+ obj-$(CONFIG_BNX2) += bnx2.o
+ obj-$(CONFIG_CNIC) += cnic.o
+diff --git a/drivers/net/ethernet/broadcom/bcmbca_xrdp_test.c b/drivers/net/ethernet/broadcom/bcmbca_xrdp_test.c
+new file mode 100644
+index 000000000000..3254baef2222
+--- /dev/null
++++ b/drivers/net/ethernet/broadcom/bcmbca_xrdp_test.c
+@@ -0,0 +1,116 @@
++// SPDX-License-Identifier: GPL-2.0-or-later
++#include <kunit/test.h>
++
++#include "bcmbca_xrdp.h"
++
++static const struct bcmbca_xrdp_enet_variant bcm6846_variant = {
++	.num_buffers = 1536,
++	.num_ports = 5,
++};
++
++static void bcmbca_xrdp_rx_valid_test(struct kunit *test)
++{
++	const struct bcmbca_xrdp_enet_variant *variant = &bcm6846_variant;
++	struct bcmbca_xrdp_rx_info info;
++	unsigned int port;
++
++	for (port = 0; port < bcm6846_variant.num_ports; port++) {
++		KUNIT_ASSERT_TRUE(test,
++				  bcmbca_xrdp_rx_decode(variant, 0x017fc000, 0x000017b8,
++							port << 25, &info));
++		KUNIT_EXPECT_EQ(test, info.buffer, 1535);
++		KUNIT_EXPECT_EQ(test, info.length, 1518);
++		KUNIT_EXPECT_EQ(test, info.offset, 0);
++		KUNIT_EXPECT_EQ(test, info.port, port);
++	}
++	KUNIT_ASSERT_TRUE(test, bcmbca_xrdp_rx_decode(variant, 0, 56, 109 << 6, &info));
++	KUNIT_EXPECT_EQ(test, info.length, 14);
++	KUNIT_EXPECT_EQ(test, info.offset, 109);
++}
++
++static void bcmbca_xrdp_rx_invalid_test(struct kunit *test)
++{
++	const struct bcmbca_xrdp_enet_variant *variant = &bcm6846_variant;
++	struct bcmbca_xrdp_rx_info info;
++
++	KUNIT_EXPECT_FALSE(test, bcmbca_xrdp_rx_decode(variant, 0, 0, 0, &info));
++	KUNIT_EXPECT_FALSE(test, bcmbca_xrdp_rx_decode(variant, 0, 52, 0, &info));
++	KUNIT_EXPECT_FALSE(test, bcmbca_xrdp_rx_decode(variant, 0, 8192, 0, &info));
++	KUNIT_EXPECT_FALSE(test, bcmbca_xrdp_rx_decode(variant, 0, 0x100f0, 0, &info));
++	KUNIT_EXPECT_FALSE(test, bcmbca_xrdp_rx_decode(variant, 0x01800000, 240, 0, &info));
++	/* Do not truncate a corrupt 18-bit buffer number to 16 bits. */
++	KUNIT_EXPECT_FALSE(test, bcmbca_xrdp_rx_decode(variant, 0x40000000, 240, 0, &info));
++	KUNIT_EXPECT_FALSE(test, bcmbca_xrdp_rx_decode(variant, 0, 240, 5 << 25, &info));
++	KUNIT_EXPECT_FALSE(test, bcmbca_xrdp_rx_decode(variant, 0, 240, 110 << 6, &info));
++}
++
++/* Descriptor validity must follow the matched pool and port limits. */
++static void bcmbca_xrdp_rx_variant_test(struct kunit *test)
++{
++	const struct bcmbca_xrdp_enet_variant variant = {
++		.num_buffers = 1024,
++		.num_ports = 2,
++	};
++	struct bcmbca_xrdp_rx_info info;
++
++	KUNIT_EXPECT_TRUE(test,
++			  bcmbca_xrdp_rx_decode(&variant, 1023 << 14, 240, 1 << 25, &info));
++	KUNIT_EXPECT_FALSE(test,
++			   bcmbca_xrdp_rx_decode(&variant, 1024 << 14, 240, 0, &info));
++	KUNIT_EXPECT_FALSE(test,
++			   bcmbca_xrdp_rx_decode(&variant, 0, 240, 2 << 25, &info));
++	KUNIT_EXPECT_TRUE(test,
++			  bcmbca_xrdp_rx_decode(&bcm6846_variant, 1024 << 14,
++						240, 2 << 25, &info));
++}
++
++static void bcmbca_xrdp_tx_credit_test(struct kunit *test)
++{
++	unsigned int consumer, outstanding;
++
++	for (consumer = 0; consumer < 256; consumer++) {
++		for (outstanding = 0; outstanding <= 8; outstanding++) {
++			u8 producer = consumer + outstanding;
++
++			KUNIT_EXPECT_EQ(test,
++					bcmbca_xrdp_tx_available(0, producer, consumer),
++					outstanding < 8);
++			KUNIT_EXPECT_FALSE(test,
++					   bcmbca_xrdp_tx_available(60, producer, consumer));
++		}
++	}
++}
++
++static void bcmbca_xrdp_tx_descriptor_test(struct kunit *test)
++{
++	unsigned int len;
++
++	for (len = 60; len <= BCMBCA_XRDP_FRAME_LEN; len++) {
++		unsigned int buffers = DIV_ROUND_UP(len, BCMBCA_XRDP_BUFFER_SIZE);
++		u32 word = BIT(31) | (buffers << 14);
++
++		/* The final 16-bit length write must preserve BN_NUM's low bits. */
++		word = (word & 0xffff0000) | bcmbca_xrdp_tx_length_word(buffers, len);
++		KUNIT_EXPECT_EQ(test, word & 0x3fff, len);
++		KUNIT_EXPECT_EQ(test, (word >> 14) & 0x7f, buffers);
++		KUNIT_EXPECT_TRUE(test, word & BIT(31));
++	}
++}
++
++static struct kunit_case bcmbca_xrdp_enet_cases[] = {
++	KUNIT_CASE(bcmbca_xrdp_rx_valid_test),
++	KUNIT_CASE(bcmbca_xrdp_rx_invalid_test),
++	KUNIT_CASE(bcmbca_xrdp_rx_variant_test),
++	KUNIT_CASE(bcmbca_xrdp_tx_credit_test),
++	KUNIT_CASE(bcmbca_xrdp_tx_descriptor_test),
++	{}
++};
++
++static struct kunit_suite bcmbca_xrdp_enet_suite = {
++	.name = "bcmbca-xrdp-enet",
++	.test_cases = bcmbca_xrdp_enet_cases,
++};
++
++kunit_test_suite(bcmbca_xrdp_enet_suite);
++
++MODULE_LICENSE("GPL");

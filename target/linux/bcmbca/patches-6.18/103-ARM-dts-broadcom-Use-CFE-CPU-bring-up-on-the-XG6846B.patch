@@ -1,0 +1,45 @@
+From b4d7379cc8f031b6b41b74cb1cb27f5681303cf2 Mon Sep 17 00:00:00 2001
+From: Linus Walleij <linusw@kernel.org>
+Date: Mon, 12 Oct 2026 00:24:49 +0200
+Subject: [PATCH] ARM: dts: broadcom: Use CFE CPU bring-up on the XG6846B
+
+The XG6846B boots through CFE, which parks CPU1 in a holding pen and does
+not provide PSCI. Chain-loading mainline U-Boot and starting Linux with
+"go" does not install a PSCI implementation either. The working PSCI
+interface in newer GenXOS firmware belongs to a different boot stack.
+
+Disable the inherited PSCI node on this board so Linux does not issue
+SMCs to an interface that is absent. Remove the CPU PSCI enable-method
+properties and use the board-specific CFE SMP operations. Describe the
+CFE mailbox in CPU1's cpu-release-addr property. Keep both CPU nodes
+enabled and leave the SoC's PSCI defaults available to other boards.
+
+Assisted-by: LLM
+Signed-off-by: Linus Walleij <linusw@kernel.org>
+
+---
+diff --git a/arch/arm/boot/dts/broadcom/bcm6846-genexis-xg6846b.dts b/arch/arm/boot/dts/broadcom/bcm6846-genexis-xg6846b.dts
+index 6cb221dca0ac..1b85e382c70c 100644
+--- a/arch/arm/boot/dts/broadcom/bcm6846-genexis-xg6846b.dts
++++ b/arch/arm/boot/dts/broadcom/bcm6846-genexis-xg6846b.dts
+@@ -56,6 +56,20 @@
+ 	};
+ };
+ 
++/* CFE parks CPU1 in its holding pen and does not provide PSCI. */
++&{/psci} {
++	status = "disabled";
++};
++
++&CA7_0 {
++	/delete-property/ enable-method;
++};
++
++&CA7_1 {
++	/delete-property/ enable-method;
++	cpu-release-addr = <0xff800568>;
++};
++
+ &gpio0 {
+ 	status = "okay";
+ };

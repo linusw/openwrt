@@ -1,0 +1,106 @@
+From 2ce0299c5b2bd0b9d3199008c4af9ca4c9d2849e Mon Sep 17 00:00:00 2001
+From: Linus Walleij <linusw@kernel.org>
+Date: Tue, 13 Oct 2026 22:40:28 +0200
+Subject: [PATCH] dt-bindings: mfd: Describe the BCM6846 PMC complex
+
+The third generation Power Management Controller (PMC3) has
+different subdevices.
+
+Identify the parent with the BCM6846-specific "brcm,bcm6846-pmc"
+compatible.
+
+Describe the complex as a simple-mfd with a PMB bus child owning its
+register resource. Include the PMB clock and reset controllers and
+PVTMON, with its acquisition clock and reset resources.
+
+Signed-off-by: Linus Walleij <linusw@kernel.org>
+
+---
+diff --git a/Documentation/devicetree/bindings/mfd/brcm,bcm6846-pmc.yaml b/Documentation/devicetree/bindings/mfd/brcm,bcm6846-pmc.yaml
+new file mode 100644
+index 000000000000..78aef68bc318
+--- /dev/null
++++ b/Documentation/devicetree/bindings/mfd/brcm,bcm6846-pmc.yaml
+@@ -0,0 +1,82 @@
++# SPDX-License-Identifier: (GPL-2.0-only OR BSD-2-Clause)
++%YAML 1.2
++---
++$id: http://devicetree.org/schemas/mfd/brcm,bcm6846-pmc.yaml#
++$schema: http://devicetree.org/meta-schemas/core.yaml#
++
++title: Broadcom BCM6846 Power Management Controller
++
++maintainers:
++  - Linus Walleij <linusw@kernel.org>
++
++description:
++  The third generation Power Management Controller (PMC3) contains several
++  register banks. This binding describes the Processor Monitor Bus (PMB)
++  interface within Procmon. The PMB child owns its register bank. The parent
++  provides address translation and does not own a register bank.
++
++properties:
++  compatible:
++    items:
++      - const: brcm,bcm6846-pmc
++      - const: simple-mfd
++
++  ranges:
++    maxItems: 1
++
++  "#address-cells":
++    const: 1
++
++  "#size-cells":
++    const: 1
++
++patternProperties:
++  '^bus@[0-9a-f]+$':
++    $ref: /schemas/soc/bcm/brcm,bcm6846-pmb.yaml#
++    description: PMB configuration, keyhole and address mapping registers
++
++required:
++  - compatible
++  - ranges
++  - '#address-cells'
++  - '#size-cells'
++
++additionalProperties: false
++
++examples:
++  - |
++    #include <dt-bindings/clock/brcm,bcm6846-pmb.h>
++    #include <dt-bindings/reset/brcm,bcm6846-pmb.h>
++
++    system-controller@ffb00000 {
++        /* Broadcom BCM6846 Power Management Controller complex */
++        compatible = "brcm,bcm6846-pmc", "simple-mfd";
++        ranges = <0x0 0xffb00000 0x21000>;
++        #address-cells = <1>;
++        #size-cells = <1>;
++
++        /* Called PMB Processor Monitor Bus in vendor tree */
++        bus@20100 {
++            compatible = "brcm,bcm6846-pmb";
++            reg = <0x20100 0x200>;
++
++            pmb_clk: clock-controller {
++                compatible = "brcm,bcm6846-pmb-clock";
++                clocks = <&osc50m>;
++                clock-names = "ref";
++                #clock-cells = <1>;
++            };
++
++            pmb_reset: reset-controller {
++                compatible = "brcm,bcm6846-pmb-reset";
++                #reset-cells = <1>;
++            };
++
++            hwmon {
++                compatible = "brcm,bcm6846-pmb-pvtmon";
++                clocks = <&pmb_clk BCM6846_CLK_PVTMON>;
++                resets = <&pmb_reset BCM6846_RESET_PVTMON>;
++                #thermal-sensor-cells = <0>;
++            };
++        };
++    };

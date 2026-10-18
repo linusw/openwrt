@@ -1,0 +1,27 @@
+From: Linus Walleij <linusw@kernel.org>
+Subject: [PATCH] ARM: dts: protect XG6846B loader and match CFE UBI extent
+
+CFE leaves the last four 128 KiB eraseblocks for the NAND BBT.
+Expose the same UBI extent to Linux and prevent writes to the loader.
+
+---
+diff --git a/arch/arm/boot/dts/broadcom/bcm6846-genexis-xg6846b.dts b/arch/arm/boot/dts/broadcom/bcm6846-genexis-xg6846b.dts
+index 16e60d6ec73e..1faee854e642 100644
+--- a/arch/arm/boot/dts/broadcom/bcm6846-genexis-xg6846b.dts
++++ b/arch/arm/boot/dts/broadcom/bcm6846-genexis-xg6846b.dts
+@@ -284,12 +284,13 @@
+ 		loader@0 {
+ 			label = "loader";
+ 			reg = <0x00000000 0x00400000>;
++			read-only;
+ 		};
+ 		image@400000 {
+ 			label = "image";
+-			reg = <0x00400000 0x0fb00000>;
++			reg = <0x00400000 0x0fb80000>;
+ 		};
+-		/* 0x00ff0000-0x00ffffff: bad block list */
++		/* 0x0ff80000-0x0fffffff: bad block tables */
+ 	};
+ };
+ 

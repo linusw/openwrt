@@ -1,0 +1,90 @@
+From 1a79978dd271859c98bd91aa733f224702ca0355 Mon Sep 17 00:00:00 2001
+From: Fidan Aliyeva <fidan.aliyeva.ext@ericsson.com>
+Date: Thu, 28 May 2026 23:03:08 +0200
+Subject: [PATCH] mv88e6xxx: Add mv88e6352_serdes_get_lane
+
+Changes:
+1. Add mv88e6352_serdes_get_lane function which checks if the port
+supports SERDES by calling mv88e6352_g2_scratch_port_has_serdes. Then
+returns the address of the SERDES lane.
+2. Add this function as .serdes_get_lane member to all the chip
+versions which use mv88e6352_pcs_init.
+
+Co-developed-by: Thomas Eckerman <thomas.eckerman.ext@ericsson.com>
+Signed-off-by: Thomas Eckerman <thomas.eckerman.ext@ericsson.com>
+Signed-off-by: Fidan Aliyeva <fidan.aliyeva.ext@ericsson.com>
+Reviewed-by: Andrew Lunn <andrew@lunn.ch>
+Link: https://patch.msgid.link/20260528210310.1365858-2-fidan.aliyeva.ext@ericsson.com
+Signed-off-by: Jakub Kicinski <kuba@kernel.org>
+
+---
+diff --git a/drivers/net/dsa/mv88e6xxx/chip.c b/drivers/net/dsa/mv88e6xxx/chip.c
+index 210202260b4c..87801365c618 100644
+--- a/drivers/net/dsa/mv88e6xxx/chip.c
++++ b/drivers/net/dsa/mv88e6xxx/chip.c
+@@ -4664,6 +4664,7 @@ static const struct mv88e6xxx_ops mv88e6172_ops = {
+ 	.vtu_loadpurge = mv88e6352_g1_vtu_loadpurge,
+ 	.stu_getnext = mv88e6352_g1_stu_getnext,
+ 	.stu_loadpurge = mv88e6352_g1_stu_loadpurge,
++	.serdes_get_lane = mv88e6352_serdes_get_lane,
+ 	.serdes_get_regs_len = mv88e6352_serdes_get_regs_len,
+ 	.serdes_get_regs = mv88e6352_serdes_get_regs,
+ 	.gpio_ops = &mv88e6352_gpio_ops,
+@@ -4767,6 +4768,7 @@ static const struct mv88e6xxx_ops mv88e6176_ops = {
+ 	.vtu_loadpurge = mv88e6352_g1_vtu_loadpurge,
+ 	.stu_getnext = mv88e6352_g1_stu_getnext,
+ 	.stu_loadpurge = mv88e6352_g1_stu_loadpurge,
++	.serdes_get_lane = mv88e6352_serdes_get_lane,
+ 	.serdes_irq_mapping = mv88e6352_serdes_irq_mapping,
+ 	.serdes_get_regs_len = mv88e6352_serdes_get_regs_len,
+ 	.serdes_get_regs = mv88e6352_serdes_get_regs,
+@@ -5042,6 +5044,7 @@ static const struct mv88e6xxx_ops mv88e6240_ops = {
+ 	.vtu_loadpurge = mv88e6352_g1_vtu_loadpurge,
+ 	.stu_getnext = mv88e6352_g1_stu_getnext,
+ 	.stu_loadpurge = mv88e6352_g1_stu_loadpurge,
++	.serdes_get_lane = mv88e6352_serdes_get_lane,
+ 	.serdes_irq_mapping = mv88e6352_serdes_irq_mapping,
+ 	.serdes_get_regs_len = mv88e6352_serdes_get_regs_len,
+ 	.serdes_get_regs = mv88e6352_serdes_get_regs,
+@@ -5479,6 +5482,7 @@ static const struct mv88e6xxx_ops mv88e6352_ops = {
+ 	.gpio_ops = &mv88e6352_gpio_ops,
+ 	.avb_ops = &mv88e6352_avb_ops,
+ 	.ptp_ops = &mv88e6352_ptp_ops,
++	.serdes_get_lane = mv88e6352_serdes_get_lane,
+ 	.serdes_get_sset_count = mv88e6352_serdes_get_sset_count,
+ 	.serdes_get_strings = mv88e6352_serdes_get_strings,
+ 	.serdes_get_stats = mv88e6352_serdes_get_stats,
+diff --git a/drivers/net/dsa/mv88e6xxx/serdes.c b/drivers/net/dsa/mv88e6xxx/serdes.c
+index d3d3c121a32d..a23eb3d50b6e 100644
+--- a/drivers/net/dsa/mv88e6xxx/serdes.c
++++ b/drivers/net/dsa/mv88e6xxx/serdes.c
+@@ -102,6 +102,17 @@ int mv88e6xxx_pcs_decode_state(struct device *dev, u16 bmsr, u16 lpa,
+ 	return 0;
+ }
+ 
++int mv88e6352_serdes_get_lane(struct mv88e6xxx_chip *chip, int port)
++{
++	int has_serdes;
++
++	has_serdes = mv88e6352_g2_scratch_port_has_serdes(chip, port);
++	if (has_serdes == 0)
++		return -ENODEV;
++
++	return MV88E6352_ADDR_SERDES;
++}
++
+ struct mv88e6352_serdes_hw_stat {
+ 	char string[ETH_GSTRING_LEN];
+ 	int sizeof_stat;
+diff --git a/drivers/net/dsa/mv88e6xxx/serdes.h b/drivers/net/dsa/mv88e6xxx/serdes.h
+index 17a3e85fabaa..21e050b328cc 100644
+--- a/drivers/net/dsa/mv88e6xxx/serdes.h
++++ b/drivers/net/dsa/mv88e6xxx/serdes.h
+@@ -115,6 +115,7 @@ int mv88e6xxx_pcs_decode_state(struct device *dev, u16 bmsr, u16 lpa,
+ 			       u16 status, struct phylink_link_state *state);
+ 
+ int mv88e6341_serdes_get_lane(struct mv88e6xxx_chip *chip, int port);
++int mv88e6352_serdes_get_lane(struct mv88e6xxx_chip *chip, int port);
+ int mv88e6390_serdes_get_lane(struct mv88e6xxx_chip *chip, int port);
+ int mv88e6390x_serdes_get_lane(struct mv88e6xxx_chip *chip, int port);
+ int mv88e6393x_serdes_get_lane(struct mv88e6xxx_chip *chip, int port);

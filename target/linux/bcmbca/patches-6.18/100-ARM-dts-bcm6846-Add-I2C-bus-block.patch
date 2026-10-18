@@ -1,0 +1,33 @@
+From 682cc367f9366aebe7d23ae33d3a5a07d24d229b Mon Sep 17 00:00:00 2001
+From: Linus Walleij <linusw@kernel.org>
+Date: Wed, 18 Feb 2026 10:30:50 +0100
+Subject: [PATCH] ARM: dts: bcm6846: Add I2C bus block
+
+The BCM6846 has a brcmper I2C block.
+
+Signed-off-by: Linus Walleij <linus.walleij@linaro.org>
+Reviewed-by: William Zhang <william.zhang@broadcom.com>
+Link: https://lore.kernel.org/r/20260218-bcmbca-i2c-dts-v2-3-5373ef82c50c@kernel.org
+Signed-off-by: Florian Fainelli <florian.fainelli@broadcom.com>
+
+---
+diff --git a/arch/arm/boot/dts/broadcom/bcm6846.dtsi b/arch/arm/boot/dts/broadcom/bcm6846.dtsi
+index f5591a45d2e4..47f177323c18 100644
+--- a/arch/arm/boot/dts/broadcom/bcm6846.dtsi
++++ b/arch/arm/boot/dts/broadcom/bcm6846.dtsi
+@@ -242,6 +242,15 @@
+ 			status = "disabled";
+ 		};
+ 
++		i2c0: i2c@2100 {
++			compatible = "brcm,brcmper-i2c";
++			reg = <0x2100 0x60>;
++			interrupts = <GIC_SPI 83 IRQ_TYPE_LEVEL_HIGH>;
++			#address-cells = <1>;
++			#size-cells = <0>;
++			status = "disabled";
++		};
++
+ 		pl081_dma: dma-controller@59000 {
+ 			compatible = "arm,pl081", "arm,primecell";
+ 			// The magic B105F00D info is missing

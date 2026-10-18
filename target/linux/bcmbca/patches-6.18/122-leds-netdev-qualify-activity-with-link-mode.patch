@@ -1,0 +1,62 @@
+From: Linus Walleij <linusw@kernel.org>
+Subject: [PATCH] leds: trigger: netdev: qualify activity with the link mode
+
+With link_100 and RX/TX enabled, a gigabit link correctly leaves an LED
+off until the first packet. Activity polling then blinks it regardless
+of speed, and the inverted one-shot restores it to on because a link
+mode is selected. On the XG6846B both the green gigabit and amber 100M
+indicators therefore light up during gigabit traffic and can remain on.
+
+Start software activity polling only when the configured link modes
+match. State changes already cancel pending work before resetting the
+baseline, and a matching link event starts polling again. Keep LEDs
+configured for activity alone working without a link mode, and leave
+hardware offload unchanged.
+Use the same link-mode mask to select the one-shot polarity.
+
+Signed-off-by: Linus Walleij <linusw@kernel.org>
+---
+--- a/drivers/leds/trigger/ledtrig-netdev.c
++++ b/drivers/leds/trigger/ledtrig-netdev.c
+@@ -29,6 +29,8 @@
+ #include "../leds.h"
+ 
+ #define NETDEV_LED_DEFAULT_INTERVAL	50
++#define NETDEV_LED_LINK_MODES		GENMASK(TRIGGER_NETDEV_FULL_DUPLEX, \
++						TRIGGER_NETDEV_LINK)
+ 
+ /*
+  * Configurable sysfs attributes:
+@@ -141,6 +143,15 @@
+ 					   led_cdev->blink_brightness);
+ 		else
+ 			led_set_brightness(led_cdev, LED_OFF);
++
++		/*
++		 * Link modes also qualify activity blinking. Otherwise traffic
++		 * blinks LEDs for other speeds and the inverted one-shot leaves
++		 * them on. Callers cancel pending work before updating state;
++		 * a later matching link event will restart activity polling.
++		 */
++		if (!blink_on && (trigger_data->mode & NETDEV_LED_LINK_MODES))
++			return;
+ 
+ 		/* If we are looking for RX/TX start periodically
+ 		 * checking stats
+@@ -661,15 +672,7 @@
+ 	if (trigger_data->last_activity != new_activity) {
+ 		led_stop_software_blink(trigger_data->led_cdev);
+ 
+-		invert = test_bit(TRIGGER_NETDEV_LINK, &trigger_data->mode) ||
+-			 test_bit(TRIGGER_NETDEV_LINK_10, &trigger_data->mode) ||
+-			 test_bit(TRIGGER_NETDEV_LINK_100, &trigger_data->mode) ||
+-			 test_bit(TRIGGER_NETDEV_LINK_1000, &trigger_data->mode) ||
+-			 test_bit(TRIGGER_NETDEV_LINK_2500, &trigger_data->mode) ||
+-			 test_bit(TRIGGER_NETDEV_LINK_5000, &trigger_data->mode) ||
+-			 test_bit(TRIGGER_NETDEV_LINK_10000, &trigger_data->mode) ||
+-			 test_bit(TRIGGER_NETDEV_HALF_DUPLEX, &trigger_data->mode) ||
+-			 test_bit(TRIGGER_NETDEV_FULL_DUPLEX, &trigger_data->mode);
++		invert = !!(trigger_data->mode & NETDEV_LED_LINK_MODES);
+ 		interval = jiffies_to_msecs(
+ 				atomic_read(&trigger_data->interval));
+ 		/* base state is ON (link present) */

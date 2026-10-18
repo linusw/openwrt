@@ -1,0 +1,97 @@
+From 372ec308e4e6a8b11728b68fc0e8c1ec54b0ba5d Mon Sep 17 00:00:00 2001
+From: Linus Walleij <linusw@kernel.org>
+Date: Tue, 20 Oct 2026 11:56:15 +0200
+Subject: [PATCH] ARM: dts: broadcom: Describe the BCM6846 XRDP Ethernet
+ controller
+
+Describe the shared XRDP Ethernet controller, its PMB clocks and reset,
+and all five UniMAC ports in the BCM6846 SoC device tree. Add Ethernet
+aliases for the ports and keep the controller and ports disabled by
+default. Boards supply PHY connections, port labels and RGMII link
+settings when enabling them.
+
+Signed-off-by: Linus Walleij <linusw@kernel.org>
+
+---
+diff --git a/arch/arm/boot/dts/broadcom/bcm6846.dtsi b/arch/arm/boot/dts/broadcom/bcm6846.dtsi
+index e9775dfc5d1b..adc9807c229b 100644
+--- a/arch/arm/boot/dts/broadcom/bcm6846.dtsi
++++ b/arch/arm/boot/dts/broadcom/bcm6846.dtsi
+@@ -15,6 +15,14 @@
+ 
+ 	interrupt-parent = <&gic>;
+ 
++	aliases {
++		ethernet0 = &gmac0;
++		ethernet1 = &gmac1;
++		ethernet2 = &gmac2;
++		ethernet3 = &gmac3;
++		ethernet4 = &gmac4;
++	};
++
+ 	cpus {
+ 		#address-cells = <1>;
+ 		#size-cells = <0>;
+@@ -109,6 +117,62 @@
+ 		};
+ 	};
+ 
++	ethernet: ethernet@82000000 {
++		compatible = "brcm,bcm6846-enet", "brcm,bcmbca-xrdp-enet";
++		reg = <0x82000000 0x1000000>;
++		clocks = <&pmb_clk BCM6846_CLK_RUNNER>,
++			 <&pmb_clk BCM6846_CLK_XRDP_ZONE0>,
++			 <&pmb_clk BCM6846_CLK_XRDP_ZONE1>,
++			 <&pmb_clk BCM6846_CLK_XRDP_ZONE2>,
++			 <&pmb_clk BCM6846_CLK_RUNNER0>,
++			 <&pmb_clk BCM6846_CLK_RUNNER1>,
++			 <&pmb_clk BCM6846_CLK_RUNNER2>,
++			 <&pmb_clk BCM6846_CLK_WAN_ZONE0>,
++			 <&pmb_clk BCM6846_CLK_WAN_ZONE1>,
++			 <&pmb_clk BCM6846_CLK_WAN_ZONE2>;
++		clock-names = "runner", "xrdp-zone0", "xrdp-zone1", "xrdp-zone2",
++			      "runner0", "runner1", "runner2",
++			      "wan-zone0", "wan-zone1", "wan-zone2";
++		resets = <&pmb_reset BCM6846_RESET_XRDP>;
++		status = "disabled";
++
++		ethernet-ports {
++			#address-cells = <1>;
++			#size-cells = <0>;
++
++			gmac0: ethernet@0 {
++				reg = <0>;
++				phy-mode = "gmii";
++				status = "disabled";
++			};
++
++			gmac1: ethernet@1 {
++				reg = <1>;
++				phy-mode = "gmii";
++				status = "disabled";
++			};
++
++			gmac2: ethernet@2 {
++				reg = <2>;
++				phy-mode = "gmii";
++				status = "disabled";
++			};
++
++			gmac3: ethernet@3 {
++				reg = <3>;
++				phy-mode = "gmii";
++				status = "disabled";
++			};
++
++			gmac4: ethernet@4 {
++				reg = <4>;
++				/* Boards must select the appropriate RGMII delay mode. */
++				phy-mode = "rgmii";
++				status = "disabled";
++			};
++		};
++	};
++
+ 	bus@ff800000 {
+ 		compatible = "simple-bus";
+ 		#address-cells = <1>;

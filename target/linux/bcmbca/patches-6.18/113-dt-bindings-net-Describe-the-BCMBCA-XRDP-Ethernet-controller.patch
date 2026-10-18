@@ -1,0 +1,174 @@
+From c1e623d65e4f50293ddabeb9d570e5b706c9c4fb Mon Sep 17 00:00:00 2001
+From: Linus Walleij <linusw@kernel.org>
+Date: Tue, 13 Oct 2026 11:46:35 +0200
+Subject: [PATCH] dt-bindings: net: Describe the BCMBCA XRDP Ethernet
+ controller
+
+Describe the BCMBCA XRDP Ethernet controller, initially for BCM6846.
+Require the SoC-specific compatible followed by brcm,bcmbca-xrdp-enet
+to identify the implementation and the controller family.
+
+BCM6846 has a shared XRDP register window, a coordinated reset and
+five UniMAC ports. Describe its Runner functional clock and the XRDP,
+Runner-core and WAN zone clocks provided by the PMB clock controller.
+Ports 0 through 3 connect to internal GMII PHYs; port 4 provides an
+RGMII connection to an external PHY or switch.
+
+Signed-off-by: Linus Walleij <linusw@kernel.org>
+
+---
+diff --git a/Documentation/devicetree/bindings/net/brcm,bcmbca-xrdp-enet.yaml b/Documentation/devicetree/bindings/net/brcm,bcmbca-xrdp-enet.yaml
+new file mode 100644
+index 000000000000..c1ca1f05d9b1
+--- /dev/null
++++ b/Documentation/devicetree/bindings/net/brcm,bcmbca-xrdp-enet.yaml
+@@ -0,0 +1,149 @@
++# SPDX-License-Identifier: (GPL-2.0-only OR BSD-2-Clause)
++%YAML 1.2
++---
++$id: http://devicetree.org/schemas/net/brcm,bcmbca-xrdp-enet.yaml#
++$schema: http://devicetree.org/meta-schemas/core.yaml#
++
++title: Broadcom BCMBCA XRDP Ethernet controller
++
++maintainers:
++  - Linus Walleij <linusw@kernel.org>
++
++description: |
++  Broadcom BCMBCA SoCs integrate an XRDP packet processor with shared
++  Runner cores and packet SRAM. The BCM6846 implementation connects four
++  GMII UniMACs to the integrated copper PHYs and a fifth UniMAC to an
++  external RGMII link.
++  All five ports share the Runner packet processor and its packet SRAM.
++
++properties:
++  compatible:
++    items:
++      - const: brcm,bcm6846-enet
++      - const: brcm,bcmbca-xrdp-enet
++
++  reg:
++    maxItems: 1
++
++  clocks:
++    items:
++      - description: Runner functional clock
++      - description: XRDP zone 0 clock
++      - description: XRDP zone 1 clock
++      - description: XRDP zone 2 clock
++      - description: Runner core 0 zone clock
++      - description: Runner core 1 zone clock
++      - description: Runner core 2 zone clock
++      - description: WAN zone 0 clock
++      - description: WAN zone 1 clock
++      - description: WAN zone 2 clock
++
++  clock-names:
++    items:
++      - const: runner
++      - const: xrdp-zone0
++      - const: xrdp-zone1
++      - const: xrdp-zone2
++      - const: runner0
++      - const: runner1
++      - const: runner2
++      - const: wan-zone0
++      - const: wan-zone1
++      - const: wan-zone2
++
++  resets:
++    maxItems: 1
++
++  ethernet-ports:
++    type: object
++    additionalProperties: false
++
++    properties:
++      '#address-cells':
++        const: 1
++      '#size-cells':
++        const: 0
++
++    patternProperties:
++      '^ethernet@[0-4]$':
++        type: object
++        $ref: ethernet-controller.yaml#
++        unevaluatedProperties: false
++
++        properties:
++          reg:
++            minimum: 0
++            maximum: 4
++            description: UniMAC port number
++
++          phy-mode:
++            enum: [gmii, rgmii, rgmii-id, rgmii-rxid, rgmii-txid]
++
++        required:
++          - reg
++          - phy-mode
++
++        allOf:
++          - if:
++              properties:
++                reg:
++                  contains:
++                    items:
++                      - maximum: 3
++            then:
++              properties:
++                phy-mode:
++                  const: gmii
++            else:
++              properties:
++                phy-mode:
++                  enum: [rgmii, rgmii-id, rgmii-rxid, rgmii-txid]
++
++    required:
++      - '#address-cells'
++      - '#size-cells'
++
++required:
++  - compatible
++  - reg
++  - clocks
++  - clock-names
++  - resets
++  - ethernet-ports
++
++additionalProperties: false
++
++examples:
++  - |
++    #include <dt-bindings/clock/brcm,bcm6846-pmb.h>
++    #include <dt-bindings/reset/brcm,bcm6846-pmb.h>
++
++    ethernet@82000000 {
++        compatible = "brcm,bcm6846-enet", "brcm,bcmbca-xrdp-enet";
++        reg = <0x82000000 0x1000000>;
++        clocks = <&pmb_clk BCM6846_CLK_RUNNER>,
++                 <&pmb_clk BCM6846_CLK_XRDP_ZONE0>,
++                 <&pmb_clk BCM6846_CLK_XRDP_ZONE1>,
++                 <&pmb_clk BCM6846_CLK_XRDP_ZONE2>,
++                 <&pmb_clk BCM6846_CLK_RUNNER0>,
++                 <&pmb_clk BCM6846_CLK_RUNNER1>,
++                 <&pmb_clk BCM6846_CLK_RUNNER2>,
++                 <&pmb_clk BCM6846_CLK_WAN_ZONE0>,
++                 <&pmb_clk BCM6846_CLK_WAN_ZONE1>,
++                 <&pmb_clk BCM6846_CLK_WAN_ZONE2>;
++        clock-names = "runner", "xrdp-zone0", "xrdp-zone1", "xrdp-zone2",
++                      "runner0", "runner1", "runner2",
++                      "wan-zone0", "wan-zone1", "wan-zone2";
++        resets = <&pmb_reset BCM6846_RESET_XRDP>;
++
++        ethernet-ports {
++            #address-cells = <1>;
++            #size-cells = <0>;
++
++            ethernet@0 {
++                reg = <0>;
++                phy-mode = "gmii";
++                phy-handle = <&phy1>;
++            };
++        };
++    };

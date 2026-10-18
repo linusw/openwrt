@@ -1,0 +1,499 @@
+From 740e1a26583a2f219bea8763b36b023c1f6804e7 Mon Sep 17 00:00:00 2001
+From: Linus Walleij <linusw@kernel.org>
+Date: Mon, 19 Oct 2026 16:33:28 +0200
+Subject: [PATCH] clk: bcm: Add BCMBCA PMB clocks
+
+Add a BCM6846 clock provider for the Processor Monitor Bus (PMB) MFD
+cell. Expose six outputs from each of the RDP and BIU PLLs, the Runner
+clock divided from RDP PLL channel 1, the crystal output, PVTMON and
+block-zone clock gates.
+
+Use sleepable prepare operations for indirect PMB accesses. Keep PLL
+rates configured by firmware and leave prepared clocks running, since
+PMC firmware can use them independently of Linux consumers. Preserve an
+active PVTMON divider; initialize an inactive clock with the vendor
+acquisition setting.
+
+Use separate register layouts for the RDP and classic BIU PLLs. Check
+the PLL lock indication before enabling an output, leaving firmware
+power and reset controls untouched.
+
+Zone clocks require an already powered block and preserve automatic
+power sequencing. PVTMON and zone clocks provide gate control only; the
+available register definitions do not establish their parent rates.
+
+Signed-off-by: Linus Walleij <linusw@kernel.org>
+
+---
+diff --git a/drivers/clk/bcm/Kconfig b/drivers/clk/bcm/Kconfig
+index a972d763eb77..c2e55451b4f6 100644
+--- a/drivers/clk/bcm/Kconfig
++++ b/drivers/clk/bcm/Kconfig
+@@ -1,5 +1,17 @@
+ # SPDX-License-Identifier: GPL-2.0-only
+ 
++config CLK_BCMBCA_PMB
++	tristate "Broadcom BCMBCA PMB clocks"
++	depends on MFD_BCMBCA_PMB
++	default MFD_BCMBCA_PMB
++	help
++	  Provide BCM6846 PLL output, Runner, crystal, PVTMON and block-zone
++	  clocks through the Processor Monitor Bus. Firmware configures PLL
++	  rates and powers blocks before their zone clocks can be prepared.
++	  Clocks remain running for firmware after their consumers release them.
++
++	  The module will be called clk-bcmbca-pmb.
++
+ config CLK_BCM2711_DVP
+ 	tristate "Broadcom BCM2711 DVP support"
+ 	depends on ARCH_BCM2835 ||COMPILE_TEST
+diff --git a/drivers/clk/bcm/Makefile b/drivers/clk/bcm/Makefile
+index d0b6f4b1fb08..7123eefff138 100644
+--- a/drivers/clk/bcm/Makefile
++++ b/drivers/clk/bcm/Makefile
+@@ -1,4 +1,5 @@
+ # SPDX-License-Identifier: GPL-2.0
++obj-$(CONFIG_CLK_BCMBCA_PMB)	+= clk-bcmbca-pmb.o
+ obj-$(CONFIG_CLK_BCM_63XX)	+= clk-bcm63xx.o
+ obj-$(CONFIG_CLK_BCM_63XX_GATE)	+= clk-bcm63xx-gate.o
+ obj-$(CONFIG_CLK_BCM63268_TIMER) += clk-bcm63268-timer.o
+diff --git a/drivers/clk/bcm/clk-bcmbca-pmb.c b/drivers/clk/bcm/clk-bcmbca-pmb.c
+new file mode 100644
+index 000000000000..ac3aadd42aaf
+--- /dev/null
++++ b/drivers/clk/bcm/clk-bcmbca-pmb.c
+@@ -0,0 +1,434 @@
++// SPDX-License-Identifier: GPL-2.0-only
++/*
++ * Broadcom BCM6846 Processor Monitor Bus (PMB) clocks.
++ *
++ * PMB transactions sleep, so gating uses the prepare callbacks. Firmware
++ * also uses these clocks: leave prepared clocks running and retain PLL
++ * rates. Zone clocks do not take over automatic power sequencing.
++ */
++
++#include <linux/bitfield.h>
++#include <linux/clk.h>
++#include <linux/clk-provider.h>
++#include <linux/math64.h>
++#include <linux/mfd/bcmbca-pmb.h>
++#include <linux/mod_devicetable.h>
++#include <linux/module.h>
++#include <linux/platform_device.h>
++#include <linux/slab.h>
++
++#include <dt-bindings/clock/brcm,bcm6846-pmb.h>
++
++/* PMB register offsets are in 32-bit words. */
++#define PLL_CHANNEL_DISABLE	BIT(8)
++#define PLL_CHANNEL_HOLD		BIT(9)
++#define PLL_MDIV_OVERRIDE		BIT(15)
++#define PLL_LOCK			BIT(31)
++#define PLL_NDIV_INT		GENMASK(9, 0)
++#define PLL_NDIV_FRAC		GENMASK(31, 12)
++#define PLL_PDIV			GENMASK(3, 0)
++
++#define XTAL_CONTROL		14
++#define XTAL_DRIVER_POWER_DOWN	BIT(17)
++
++#define PVTMON_CONFIG		17
++#define PVTMON_CLOCK_ENABLE	BIT(2)
++#define PVTMON_CLOCK_DIVIDER	GENMASK(12, 8)
++
++#define ZONE_CLOCK_ENABLE	BIT(0)
++#define ZONE_MANUAL_CONTROL	BIT(7)
++#define ZONE_POWER_DOWN_REQUEST	BIT(9)
++#define ZONE_POWER_ON		BIT(26)
++
++enum bcmbca_pmb_clock_type {
++	PMB_PLL_CHANNEL,
++	PMB_RUNNER,
++	PMB_XTAL,
++	PMB_PVTMON,
++	PMB_ZONE,
++};
++
++struct bcmbca_pmb_pll_layout {
++	u16 ch01;
++	u16 status;
++	u16 ndiv;
++	u16 pdiv;
++	u16 ch25;
++};
++
++struct bcmbca_pmb_clock_desc {
++	const char *name;
++	enum bcmbca_pmb_clock_type type;
++	u8 bus;
++	u8 device;
++	u8 channel;
++	u16 reg;
++	const struct bcmbca_pmb_pll_layout *pll;
++};
++
++struct bcmbca_pmb_clock {
++	struct clk_hw hw;
++	struct device *dev;
++	struct bcmbca_pmb *pmb;
++	const struct bcmbca_pmb_clock_desc *desc;
++};
++
++#define to_pmb_clock(_hw) container_of(_hw, struct bcmbca_pmb_clock, hw)
++
++static int bcmbca_pmb_clock_read(struct bcmbca_pmb_clock *clock, u16 reg,
++				 u32 *value)
++{
++	return bcmbca_pmb_read(clock->pmb, clock->desc->bus,
++			      clock->desc->device, reg, value);
++}
++
++static int bcmbca_pmb_clock_write(struct bcmbca_pmb_clock *clock, u16 reg,
++				  u32 value)
++{
++	return bcmbca_pmb_write(clock->pmb, clock->desc->bus,
++			       clock->desc->device, reg, value);
++}
++
++static int bcmbca_pmb_pll_ready(struct bcmbca_pmb_clock *clock)
++{
++	u32 status;
++	int ret;
++
++	/* Firmware owns PLL power and reset; use the hardware lock indication. */
++	ret = bcmbca_pmb_clock_read(clock, clock->desc->pll->status, &status);
++	if (ret)
++		return ret;
++
++	return status & PLL_LOCK ? 0 : -EAGAIN;
++}
++
++static int bcmbca_pmb_clock_prepare(struct clk_hw *hw)
++{
++	struct bcmbca_pmb_clock *clock = to_pmb_clock(hw);
++	const struct bcmbca_pmb_clock_desc *desc = clock->desc;
++	u32 value, updated;
++	u16 reg = desc->reg;
++	unsigned int shift = (desc->channel % 2) * 16;
++	int ret;
++
++	ret = bcmbca_pmb_lock(clock->pmb);
++	if (ret)
++		return ret;
++
++	if (desc->type == PMB_PLL_CHANNEL) {
++		reg = desc->pll->ch01 + desc->channel / 2;
++		ret = bcmbca_pmb_pll_ready(clock);
++		if (ret)
++			goto unlock;
++	}
++
++	ret = bcmbca_pmb_clock_read(clock, reg, &value);
++	if (ret)
++		goto unlock;
++	updated = value;
++
++	switch (desc->type) {
++	case PMB_PLL_CHANNEL:
++		/* A held output may be undergoing a firmware rate transition. */
++		if (value & (PLL_CHANNEL_HOLD << shift)) {
++			ret = -EBUSY;
++			goto unlock;
++		}
++		updated &= ~(PLL_CHANNEL_DISABLE << shift);
++		break;
++	case PMB_XTAL:
++		updated &= ~XTAL_DRIVER_POWER_DOWN;
++		break;
++	case PMB_PVTMON:
++		/* Preserve the divider when firmware already enabled acquisition. */
++		if (!(value & PVTMON_CLOCK_ENABLE)) {
++			updated &= ~PVTMON_CLOCK_DIVIDER;
++			updated |= PVTMON_CLOCK_ENABLE |
++				   FIELD_PREP(PVTMON_CLOCK_DIVIDER, 5);
++		}
++		break;
++	case PMB_ZONE:
++		/* Power and isolation belong to the power-domain sequencer. */
++		if (!(value & ZONE_POWER_ON) || value & ZONE_POWER_DOWN_REQUEST) {
++			ret = -EHOSTDOWN;
++			goto unlock;
++		}
++		if (value & ZONE_MANUAL_CONTROL)
++			updated |= ZONE_CLOCK_ENABLE;
++		break;
++	case PMB_RUNNER:
++		break;
++	}
++
++	if (updated != value)
++		ret = bcmbca_pmb_clock_write(clock, reg, updated);
++
++unlock:
++	bcmbca_pmb_unlock(clock->pmb);
++	return ret;
++}
++
++static int bcmbca_pmb_clock_is_prepared(struct clk_hw *hw)
++{
++	struct bcmbca_pmb_clock *clock = to_pmb_clock(hw);
++	const struct bcmbca_pmb_clock_desc *desc = clock->desc;
++	unsigned int shift = (desc->channel % 2) * 16;
++	u16 reg = desc->reg;
++	u32 value;
++	int ret;
++
++	ret = bcmbca_pmb_lock(clock->pmb);
++	if (ret)
++		return 0;
++	if (desc->type == PMB_PLL_CHANNEL) {
++		reg = desc->pll->ch01 + desc->channel / 2;
++		ret = bcmbca_pmb_pll_ready(clock);
++		if (ret)
++			goto unlock;
++	}
++	ret = bcmbca_pmb_clock_read(clock, reg, &value);
++	if (ret)
++		goto unlock;
++
++	switch (desc->type) {
++	case PMB_PLL_CHANNEL:
++		ret = !(value & ((PLL_CHANNEL_DISABLE | PLL_CHANNEL_HOLD) << shift));
++		break;
++	case PMB_XTAL:
++		ret = !(value & XTAL_DRIVER_POWER_DOWN);
++		break;
++	case PMB_PVTMON:
++		ret = !!(value & PVTMON_CLOCK_ENABLE);
++		break;
++	case PMB_ZONE:
++		ret = (value & ZONE_POWER_ON) && !(value & ZONE_POWER_DOWN_REQUEST) &&
++		      (!(value & ZONE_MANUAL_CONTROL) || (value & ZONE_CLOCK_ENABLE));
++		break;
++	case PMB_RUNNER:
++		break;
++	}
++
++unlock:
++	bcmbca_pmb_unlock(clock->pmb);
++	return ret < 0 ? 0 : ret;
++}
++
++static unsigned long bcmbca_pmb_clock_recalc_rate(struct clk_hw *hw,
++						  unsigned long parent_rate)
++{
++	struct bcmbca_pmb_clock *clock = to_pmb_clock(hw);
++	const struct bcmbca_pmb_clock_desc *desc = clock->desc;
++	u32 ndiv, pdiv, channel, decoded, mdiv;
++	unsigned int shift = (desc->channel % 2) * 16;
++	u64 multiplier, rate;
++	int ret;
++
++	if (desc->type == PMB_XTAL)
++		return parent_rate;
++	/* The vendor sources do not identify these clocks' parent rates. */
++	if (desc->type != PMB_PLL_CHANNEL)
++		return 0;
++
++	ret = bcmbca_pmb_lock(clock->pmb);
++	if (ret)
++		return 0;
++	ret = bcmbca_pmb_clock_read(clock, desc->pll->ndiv, &ndiv);
++	if (ret)
++		goto unlock;
++	ret = bcmbca_pmb_clock_read(clock, desc->pll->pdiv, &pdiv);
++	if (ret)
++		goto unlock;
++	ret = bcmbca_pmb_clock_read(clock, desc->pll->ch01 + desc->channel / 2,
++				    &channel);
++	if (ret)
++		goto unlock;
++
++	if (channel & (PLL_MDIV_OVERRIDE << shift)) {
++		mdiv = (channel >> shift) & 0xff;
++	} else if (desc->channel < 2) {
++		mdiv = (pdiv >> (16 + desc->channel * 8)) & 0xff;
++	} else {
++		ret = bcmbca_pmb_clock_read(clock, desc->pll->ch25, &decoded);
++		if (ret)
++			goto unlock;
++		mdiv = (decoded >> ((desc->channel - 2) * 8)) & 0xff;
++	}
++	pdiv = FIELD_GET(PLL_PDIV, pdiv);
++	/* No rate can be determined from a zero divider. */
++	if (!pdiv || !mdiv) {
++		bcmbca_pmb_unlock(clock->pmb);
++		return 0;
++	}
++	multiplier = ((u64)FIELD_GET(PLL_NDIV_INT, ndiv) << 20) |
++		     FIELD_GET(PLL_NDIV_FRAC, ndiv);
++	rate = div64_u64((u64)parent_rate * multiplier,
++			 ((u64)pdiv * mdiv) << 20);
++	bcmbca_pmb_unlock(clock->pmb);
++
++	return rate > ULONG_MAX ? 0 : rate;
++
++unlock:
++	bcmbca_pmb_unlock(clock->pmb);
++	dev_err_ratelimited(clock->dev, "cannot read %s rate: %d\n", desc->name, ret);
++	return 0;
++}
++
++static const struct clk_ops bcmbca_pmb_clock_ops = {
++	.prepare = bcmbca_pmb_clock_prepare,
++	.is_prepared = bcmbca_pmb_clock_is_prepared,
++	.recalc_rate = bcmbca_pmb_clock_recalc_rate,
++	/* No unprepare: these clocks can remain in use by PMC firmware. */
++};
++
++static const struct bcmbca_pmb_pll_layout bcm6846_rdppll = {
++	.ch01 = 16,
++	.status = 19,
++	.ndiv = 21,
++	.pdiv = 22,
++	.ch25 = 23,
++};
++
++/* The BIU PLL uses the classic BPCM register layout. */
++static const struct bcmbca_pmb_pll_layout bcm6846_biupll = {
++	.ch01 = 11,
++	.status = 15,
++	.ndiv = 17,
++	.pdiv = 18,
++	.ch25 = 19,
++};
++
++#define PMB_PLL(_id, _name, _device, _channel, _pll) \
++	[_id] = { .name = _name, .type = PMB_PLL_CHANNEL, .bus = 1, \
++		  .device = _device, .channel = _channel, \
++		  .pll = _pll }
++#define PMB_GATE(_id, _name, _type, _bus, _device, _reg) \
++	[_id] = { .name = _name, .type = _type, .bus = _bus, \
++		  .device = _device, .reg = _reg }
++#define PMB_ZONE_CLK(_id, _name, _bus, _device, _zone) \
++	PMB_GATE(_id, _name, PMB_ZONE, _bus, _device, 32 + (_zone) * 8)
++
++static const struct bcmbca_pmb_clock_desc bcm6846_clocks[] = {
++	PMB_PLL(BCM6846_CLK_RDPPLL_CH0, "rdppll-ch0", 3, 0, &bcm6846_rdppll),
++	PMB_PLL(BCM6846_CLK_RDPPLL_CH1, "rdppll-ch1", 3, 1, &bcm6846_rdppll),
++	PMB_PLL(BCM6846_CLK_RDPPLL_CH2, "rdppll-ch2", 3, 2, &bcm6846_rdppll),
++	PMB_PLL(BCM6846_CLK_RDPPLL_CH3, "rdppll-ch3", 3, 3, &bcm6846_rdppll),
++	PMB_PLL(BCM6846_CLK_RDPPLL_CH4, "rdppll-ch4", 3, 4, &bcm6846_rdppll),
++	PMB_PLL(BCM6846_CLK_RDPPLL_CH5, "rdppll-ch5", 3, 5, &bcm6846_rdppll),
++	PMB_PLL(BCM6846_CLK_BIUPLL_CH0, "biupll-ch0", 38, 0, &bcm6846_biupll),
++	PMB_PLL(BCM6846_CLK_BIUPLL_CH1, "biupll-ch1", 38, 1, &bcm6846_biupll),
++	PMB_PLL(BCM6846_CLK_BIUPLL_CH2, "biupll-ch2", 38, 2, &bcm6846_biupll),
++	PMB_PLL(BCM6846_CLK_BIUPLL_CH3, "biupll-ch3", 38, 3, &bcm6846_biupll),
++	PMB_PLL(BCM6846_CLK_BIUPLL_CH4, "biupll-ch4", 38, 4, &bcm6846_biupll),
++	PMB_PLL(BCM6846_CLK_BIUPLL_CH5, "biupll-ch5", 38, 5, &bcm6846_biupll),
++	[BCM6846_CLK_RUNNER] = { .name = "runner", .type = PMB_RUNNER },
++	PMB_GATE(BCM6846_CLK_XTAL_OUT, "xtal-out", PMB_XTAL, 1, 1, XTAL_CONTROL),
++	PMB_GATE(BCM6846_CLK_PVTMON, "pvtmon", PMB_PVTMON, 1, 6, PVTMON_CONFIG),
++	PMB_ZONE_CLK(BCM6846_CLK_PERIPH_ZONE0, "periph-zone0", 0, 0, 0),
++	PMB_ZONE_CLK(BCM6846_CLK_PERIPH_ZONE1, "periph-zone1", 0, 0, 1),
++	PMB_ZONE_CLK(BCM6846_CLK_PERIPH_ZONE2, "periph-zone2", 0, 0, 2),
++	PMB_ZONE_CLK(BCM6846_CLK_PERIPH_ZONE3, "periph-zone3", 0, 0, 3),
++	PMB_ZONE_CLK(BCM6846_CLK_MEMC, "memc", 1, 8, 0),
++	PMB_ZONE_CLK(BCM6846_CLK_USB_ZONE0, "usb-zone0", 1, 10, 0),
++	PMB_ZONE_CLK(BCM6846_CLK_USB_ZONE1, "usb-zone1", 1, 10, 1),
++	PMB_ZONE_CLK(BCM6846_CLK_USB_ZONE2, "usb-zone2", 1, 10, 2),
++	PMB_ZONE_CLK(BCM6846_CLK_USB_ZONE3, "usb-zone3", 1, 10, 3),
++	PMB_ZONE_CLK(BCM6846_CLK_WAN_ZONE0, "wan-zone0", 1, 11, 0),
++	PMB_ZONE_CLK(BCM6846_CLK_WAN_ZONE1, "wan-zone1", 1, 11, 1),
++	PMB_ZONE_CLK(BCM6846_CLK_WAN_ZONE2, "wan-zone2", 1, 11, 2),
++	PMB_ZONE_CLK(BCM6846_CLK_XRDP_ZONE0, "xrdp-zone0", 1, 12, 0),
++	PMB_ZONE_CLK(BCM6846_CLK_XRDP_ZONE1, "xrdp-zone1", 1, 12, 1),
++	PMB_ZONE_CLK(BCM6846_CLK_XRDP_ZONE2, "xrdp-zone2", 1, 12, 2),
++	PMB_ZONE_CLK(BCM6846_CLK_RUNNER0, "runner0", 1, 14, 0),
++	PMB_ZONE_CLK(BCM6846_CLK_RUNNER1, "runner1", 1, 15, 0),
++	PMB_ZONE_CLK(BCM6846_CLK_RUNNER2, "runner2", 1, 16, 0),
++	PMB_ZONE_CLK(BCM6846_CLK_PCIE0, "pcie0", 0, 18, 0),
++	PMB_ZONE_CLK(BCM6846_CLK_PCIE1, "pcie1", 0, 19, 0),
++	/* BIU uses the classic BPCM layout, with its zone at word 16. */
++	PMB_GATE(BCM6846_CLK_BIU, "biu", PMB_ZONE, 1, 39, 16),
++};
++
++static int bcmbca_pmb_clock_probe(struct platform_device *pdev)
++{
++	struct device *dev = &pdev->dev;
++	struct clk_hw_onecell_data *data;
++	struct bcmbca_pmb_clock *clocks;
++	struct bcmbca_pmb *pmb;
++	struct clk *ref;
++	unsigned int i;
++	int ret;
++
++	pmb = bcmbca_pmb_get(dev);
++	if (IS_ERR(pmb))
++		return PTR_ERR(pmb);
++	ref = devm_clk_get(dev, "ref");
++	if (IS_ERR(ref))
++		return dev_err_probe(dev, PTR_ERR(ref), "failed to get reference clock\n");
++
++	data = devm_kzalloc(dev, struct_size(data, hws, ARRAY_SIZE(bcm6846_clocks)),
++			    GFP_KERNEL);
++	if (!data)
++		return -ENOMEM;
++	data->num = ARRAY_SIZE(bcm6846_clocks);
++	clocks = devm_kcalloc(dev, data->num, sizeof(*clocks), GFP_KERNEL);
++	if (!clocks)
++		return -ENOMEM;
++
++	for (i = 0; i < data->num; i++) {
++		const struct bcmbca_pmb_clock_desc *desc = &bcm6846_clocks[i];
++		struct clk_parent_data parent = {};
++		struct clk_init_data init = {
++			.ops = &bcmbca_pmb_clock_ops,
++			.flags = CLK_GET_RATE_NOCACHE | CLK_IGNORE_UNUSED,
++		};
++
++		init.name = devm_kasprintf(dev, GFP_KERNEL, "%s-%s", dev_name(dev), desc->name);
++		if (!init.name)
++			return -ENOMEM;
++		if (desc->type == PMB_RUNNER) {
++			struct clk_hw *parent_hw = data->hws[BCM6846_CLK_RDPPLL_CH1];
++			struct clk_hw *runner;
++
++			runner = devm_clk_hw_register_fixed_factor_parent_hw(dev,
++									     init.name, parent_hw,
++									     init.flags, 1, 2);
++			data->hws[i] = runner;
++			if (IS_ERR(data->hws[i]))
++				return PTR_ERR(data->hws[i]);
++			continue;
++		}
++		if (desc->type == PMB_PLL_CHANNEL || desc->type == PMB_XTAL) {
++			parent.fw_name = "ref";
++			init.parent_data = &parent;
++			init.num_parents = 1;
++		}
++		clocks[i].pmb = pmb;
++		clocks[i].dev = dev;
++		clocks[i].desc = desc;
++		clocks[i].hw.init = &init;
++		ret = devm_clk_hw_register(dev, &clocks[i].hw);
++		if (ret)
++			return dev_err_probe(dev, ret, "failed to register %s\n", desc->name);
++		data->hws[i] = &clocks[i].hw;
++	}
++
++	return devm_of_clk_add_hw_provider(dev, of_clk_hw_onecell_get, data);
++}
++
++static const struct of_device_id bcmbca_pmb_clock_match[] = {
++	{ .compatible = "brcm,bcm6846-pmb-clock" },
++	{ }
++};
++MODULE_DEVICE_TABLE(of, bcmbca_pmb_clock_match);
++
++static struct platform_driver bcmbca_pmb_clock_driver = {
++	.probe = bcmbca_pmb_clock_probe,
++	.driver = {
++		.name = "bcm6846-pmb-clock",
++		.of_match_table = bcmbca_pmb_clock_match,
++	},
++};
++module_platform_driver(bcmbca_pmb_clock_driver);
++
++MODULE_AUTHOR("Linus Walleij <linusw@kernel.org>");
++MODULE_DESCRIPTION("Broadcom BCMBCA PMB clocks");
++MODULE_LICENSE("GPL");

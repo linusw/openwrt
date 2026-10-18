@@ -1,0 +1,11 @@
+#!/bin/sh /etc/rc.common
+# SPDX-License-Identifier: GPL-2.0-only
+
+# Run after network setup and S95done, before S96led applies UCI overrides.
+START=95
+
+start() {
+	[ "$(board_name)" = "genexis,xg6846b" ] || return 0
+
+	/usr/sbin/xg6846b-leds.sh
+}

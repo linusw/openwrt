@@ -1,0 +1,129 @@
+From dee68577fdae3cf0ef3722bcaf696ae10d2af211 Mon Sep 17 00:00:00 2001
+From: Linus Walleij <linusw@kernel.org>
+Date: Tue, 13 Oct 2026 11:46:36 +0200
+Subject: [PATCH] ARM: dts: bcm: Add Marvell switch and SFP to XG6846B
+
+Connect the Marvell 88E6320 CPU port 6 to UniMAC4 using a fixed gigabit
+RGMII link, with delays supplied by the switch. Enable copper WAN on
+switch port 4 using its internal PHY.
+
+Describe the SFP cage on the board I2C bus and enable switch port 1
+with a 1000BASE-X link and in-band status. Disable the unused SoC SerDes
+WAN port.
+
+Hold GPIO 40 high using a GPIO hog, matching the vendor optical-enable
+state. With the pin left as an input, reads from the module EEPROM NACK.
+Driving it high enables access; an OpenWrt Linux 6.18 boot test then
+identifies an OEM FTCS-1312-20D module through the existing I2C driver.
+
+Signed-off-by: Linus Walleij <linusw@kernel.org>
+
+---
+diff --git a/arch/arm/boot/dts/broadcom/bcm6846-genexis-xg6846b.dts b/arch/arm/boot/dts/broadcom/bcm6846-genexis-xg6846b.dts
+index 73f688bbfa2a..16e60d6ec73e 100644
+--- a/arch/arm/boot/dts/broadcom/bcm6846-genexis-xg6846b.dts
++++ b/arch/arm/boot/dts/broadcom/bcm6846-genexis-xg6846b.dts
+@@ -54,6 +54,11 @@
+ 			gpios = <&gpio0 41 GPIO_ACTIVE_LOW>;
+ 		};
+ 	};
++
++	sfp0: sfp {
++		compatible = "sff,sfp";
++		i2c-bus = <&i2c0>;
++	};
+ };
+ 
+ /* CFE parks CPU1 in its holding pen and does not provide PSCI. */
+@@ -119,6 +124,14 @@
+ 
+ &gpio1 {
+ 	status = "okay";
++
++	sfp-enable-hog {
++		/* GPIO 40 must be high for SFP EEPROM access. */
++		gpio-hog;
++		gpios = <8 GPIO_ACTIVE_HIGH>;
++		output-high;
++		line-name = "sfp-enable";
++	};
+ };
+ 
+ &gpio2 {
+@@ -280,9 +293,68 @@
+ 	};
+ };
+ 
++&i2c0 {
++	clock-frequency = <97500>;
++	status = "okay";
++};
++
+ &mdio {
+ 	status = "okay";
+ 
++	switch0: switch@0 {
++		/* MV88E6320 revision 2, using direct SMI addressing. */
++		compatible = "marvell,mv88e6085";
++		reg = <0>;
++		interrupt-controller;
++		#interrupt-cells = <2>;
++
++		ethernet-ports {
++			#address-cells = <1>;
++			#size-cells = <0>;
++
++			port@0 {
++				/* The separate BCM6846 WAN SerDes is not used. */
++				reg = <0>;
++				status = "disabled";
++			};
++
++			port@1 {
++				reg = <1>;
++				label = "sfp";
++				phy-mode = "1000base-x";
++				managed = "in-band-status";
++				sfp = <&sfp0>;
++			};
++
++			port@4 {
++				reg = <4>;
++				label = "wan";
++				phy-mode = "internal";
++				phy-handle = <&switch_phy4>;
++			};
++
++			port@6 {
++				reg = <6>;
++				ethernet = <&gmac4>;
++				phy-mode = "rgmii-id";
++
++				fixed-link {
++					speed = <1000>;
++					full-duplex;
++				};
++			};
++		};
++
++		mdio {
++			#address-cells = <1>;
++			#size-cells = <0>;
++
++			switch_phy4: ethernet-phy@4 {
++				reg = <4>;
++			};
++		};
++	};
++
+ 	phy1: ethernet-phy@1 {
+ 		reg = <1>;
+ 	};
+@@ -295,7 +367,4 @@
+ 	phy4: ethernet-phy@4 {
+ 		reg = <4>;
+ 	};
+-	phy21: ethernet-phy@21 {
+-		reg = <21>;
+-	};
+ };

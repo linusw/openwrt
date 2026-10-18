@@ -1,0 +1,94 @@
+From f456c9b936b62d755719acd929c8de57c2f1affe Mon Sep 17 00:00:00 2001
+From: Fidan Aliyeva <fidan.aliyeva.ext@ericsson.com>
+Date: Thu, 28 May 2026 23:03:10 +0200
+Subject: [PATCH] mv88e6xxx: Add SERDES Support for mv88e6321
+
+Add serdes and pcs_ops functions for mv88e6321. In mv88e6321
+2 ports support serdes functionality; port 0 and port 1. These ports are
+serdes-only ports.
+
+Changes:
+
+1. Add a function support to return the lane address for the port based on
+cmode.
+2. Reuse mv88e6352's serdes_get_regs* and pcs_init functions for mv88e6321.
+
+Tested on mv88e6321 switch port 0.
+
+Co-developed-by: Thomas Eckerman <thomas.eckerman.ext@ericsson.com>
+Signed-off-by: Thomas Eckerman <thomas.eckerman.ext@ericsson.com>
+Signed-off-by: Fidan Aliyeva <fidan.aliyeva.ext@ericsson.com>
+Reviewed-by: Andrew Lunn <andrew@lunn.ch>
+Link: https://patch.msgid.link/20260528210310.1365858-4-fidan.aliyeva.ext@ericsson.com
+Signed-off-by: Jakub Kicinski <kuba@kernel.org>
+
+---
+diff --git a/drivers/net/dsa/mv88e6xxx/chip.c b/drivers/net/dsa/mv88e6xxx/chip.c
+index 87801365c618..1c01f072585c 100644
+--- a/drivers/net/dsa/mv88e6xxx/chip.c
++++ b/drivers/net/dsa/mv88e6xxx/chip.c
+@@ -5263,10 +5263,14 @@ static const struct mv88e6xxx_ops mv88e6321_ops = {
+ 	.vtu_loadpurge = mv88e6352_g1_vtu_loadpurge,
+ 	.stu_getnext = mv88e6352_g1_stu_getnext,
+ 	.stu_loadpurge = mv88e6352_g1_stu_loadpurge,
++	.serdes_get_lane = mv88e6321_serdes_get_lane,
++	.serdes_get_regs_len = mv88e6352_serdes_get_regs_len,
++	.serdes_get_regs = mv88e6352_serdes_get_regs,
+ 	.gpio_ops = &mv88e6352_gpio_ops,
+ 	.avb_ops = &mv88e6352_avb_ops,
+ 	.ptp_ops = &mv88e6352_ptp_ops,
+ 	.phylink_get_caps = mv88e632x_phylink_get_caps,
++	.pcs_ops = &mv88e6352_pcs_ops,
+ };
+ 
+ static const struct mv88e6xxx_ops mv88e6341_ops = {
+diff --git a/drivers/net/dsa/mv88e6xxx/serdes.c b/drivers/net/dsa/mv88e6xxx/serdes.c
+index 48db9932b989..4a394d47923e 100644
+--- a/drivers/net/dsa/mv88e6xxx/serdes.c
++++ b/drivers/net/dsa/mv88e6xxx/serdes.c
+@@ -241,6 +241,24 @@ void mv88e6352_serdes_get_regs(struct mv88e6xxx_chip *chip, int port, void *_p)
+ 	}
+ }
+ 
++int mv88e6321_serdes_get_lane(struct mv88e6xxx_chip *chip, int port)
++{
++	int lane = -ENODEV;
++	u8 cmode;
++
++	if (port != 0 && port != 1)
++		return lane;
++
++	cmode = chip->ports[port].cmode;
++
++	if (cmode == MV88E6XXX_PORT_STS_CMODE_100BASEX ||
++	    cmode == MV88E6XXX_PORT_STS_CMODE_1000BASEX ||
++	    cmode == MV88E6XXX_PORT_STS_CMODE_SGMII)
++		lane = port + MV88E6321_PORT0_LANE;
++
++	return lane;
++}
++
+ int mv88e6341_serdes_get_lane(struct mv88e6xxx_chip *chip, int port)
+ {
+ 	u8 cmode = chip->ports[port].cmode;
+diff --git a/drivers/net/dsa/mv88e6xxx/serdes.h b/drivers/net/dsa/mv88e6xxx/serdes.h
+index 21e050b328cc..e8f254909d6b 100644
+--- a/drivers/net/dsa/mv88e6xxx/serdes.h
++++ b/drivers/net/dsa/mv88e6xxx/serdes.h
+@@ -14,6 +14,8 @@
+ 
+ struct phylink_link_state;
+ 
++#define MV88E6321_PORT0_LANE		0x0c
++
+ #define MV88E6352_ADDR_SERDES		0x0f
+ #define MV88E6352_SERDES_PAGE_FIBER	0x01
+ #define MV88E6352_SERDES_IRQ		0x0b
+@@ -114,6 +116,7 @@ struct phylink_link_state;
+ int mv88e6xxx_pcs_decode_state(struct device *dev, u16 bmsr, u16 lpa,
+ 			       u16 status, struct phylink_link_state *state);
+ 
++int mv88e6321_serdes_get_lane(struct mv88e6xxx_chip *chip, int port);
+ int mv88e6341_serdes_get_lane(struct mv88e6xxx_chip *chip, int port);
+ int mv88e6352_serdes_get_lane(struct mv88e6xxx_chip *chip, int port);
+ int mv88e6390_serdes_get_lane(struct mv88e6xxx_chip *chip, int port);

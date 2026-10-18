@@ -1,0 +1,72 @@
+From f21395a783ffa24c2b6fbe491f0172df8aa38e8b Mon Sep 17 00:00:00 2001
+From: Fidan Aliyeva <fidan.aliyeva.ext@ericsson.com>
+Date: Thu, 21 May 2026 22:29:21 +0200
+Subject: [PATCH] mv88e6xxx: Add mv88e6352_reset for 6352 family
+
+1. Add mv88e6352_reset which calls the previous ops->reset function
+ - mv88e6352_g1_reset.
+2. Make all 6352 family use this new function as ops->reset
+
+Co-developed-by: Thomas Eckerman <thomas.eckerman.ext@ericsson.com>
+Signed-off-by: Thomas Eckerman <thomas.eckerman.ext@ericsson.com>
+Signed-off-by: Fidan Aliyeva <fidan.aliyeva.ext@ericsson.com>
+Link: https://patch.msgid.link/20260521202924.727929-2-fidan.aliyeva.ext@ericsson.com
+Signed-off-by: Paolo Abeni <pabeni@redhat.com>
+
+---
+diff --git a/drivers/net/dsa/mv88e6xxx/chip.c b/drivers/net/dsa/mv88e6xxx/chip.c
+index e835c68a5bb4..f747689dfe24 100644
+--- a/drivers/net/dsa/mv88e6xxx/chip.c
++++ b/drivers/net/dsa/mv88e6xxx/chip.c
+@@ -3740,6 +3740,15 @@ static int mv88e6390_setup_errata(struct mv88e6xxx_chip *chip)
+ 	return mv88e6xxx_software_reset(chip);
+ }
+ 
++static int mv88e6352_reset(struct mv88e6xxx_chip *chip)
++{
++	int err;
++
++	err = mv88e6352_g1_reset(chip);
++
++	return err;
++}
++
+ /* prod_id for switch families which do not have a PHY model number */
+ static const u16 family_prod_id_table[] = {
+ 	[MV88E6XXX_FAMILY_6341] = MV88E6XXX_PORT_SWITCH_ID_PROD_6341,
+@@ -4645,7 +4654,7 @@ static const struct mv88e6xxx_ops mv88e6172_ops = {
+ 	.pot_clear = mv88e6xxx_g2_pot_clear,
+ 	.hardware_reset_pre = mv88e6xxx_g2_eeprom_wait,
+ 	.hardware_reset_post = mv88e6xxx_g2_eeprom_wait,
+-	.reset = mv88e6352_g1_reset,
++	.reset = mv88e6352_reset,
+ 	.rmu_disable = mv88e6352_g1_rmu_disable,
+ 	.atu_get_hash = mv88e6165_g1_atu_get_hash,
+ 	.atu_set_hash = mv88e6165_g1_atu_set_hash,
+@@ -4748,7 +4757,7 @@ static const struct mv88e6xxx_ops mv88e6176_ops = {
+ 	.pot_clear = mv88e6xxx_g2_pot_clear,
+ 	.hardware_reset_pre = mv88e6xxx_g2_eeprom_wait,
+ 	.hardware_reset_post = mv88e6xxx_g2_eeprom_wait,
+-	.reset = mv88e6352_g1_reset,
++	.reset = mv88e6352_reset,
+ 	.rmu_disable = mv88e6352_g1_rmu_disable,
+ 	.atu_get_hash = mv88e6165_g1_atu_get_hash,
+ 	.atu_set_hash = mv88e6165_g1_atu_set_hash,
+@@ -5023,7 +5032,7 @@ static const struct mv88e6xxx_ops mv88e6240_ops = {
+ 	.pot_clear = mv88e6xxx_g2_pot_clear,
+ 	.hardware_reset_pre = mv88e6xxx_g2_eeprom_wait,
+ 	.hardware_reset_post = mv88e6xxx_g2_eeprom_wait,
+-	.reset = mv88e6352_g1_reset,
++	.reset = mv88e6352_reset,
+ 	.rmu_disable = mv88e6352_g1_rmu_disable,
+ 	.atu_get_hash = mv88e6165_g1_atu_get_hash,
+ 	.atu_set_hash = mv88e6165_g1_atu_set_hash,
+@@ -5456,7 +5465,7 @@ static const struct mv88e6xxx_ops mv88e6352_ops = {
+ 	.pot_clear = mv88e6xxx_g2_pot_clear,
+ 	.hardware_reset_pre = mv88e6xxx_g2_eeprom_wait,
+ 	.hardware_reset_post = mv88e6xxx_g2_eeprom_wait,
+-	.reset = mv88e6352_g1_reset,
++	.reset = mv88e6352_reset,
+ 	.rmu_disable = mv88e6352_g1_rmu_disable,
+ 	.atu_get_hash = mv88e6165_g1_atu_get_hash,
+ 	.atu_set_hash = mv88e6165_g1_atu_set_hash,

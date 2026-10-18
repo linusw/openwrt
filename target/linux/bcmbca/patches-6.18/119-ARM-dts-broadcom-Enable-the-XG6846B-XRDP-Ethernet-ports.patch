@@ -1,0 +1,65 @@
+From a3e3e1bab7351d6c9e7f890ba3705b0bb1ae3457 Mon Sep 17 00:00:00 2001
+From: Linus Walleij <linusw@kernel.org>
+Date: Tue, 13 Oct 2026 11:46:36 +0200
+Subject: [PATCH] ARM: dts: broadcom: Enable the XG6846B XRDP Ethernet ports
+
+Enable the shared XRDP Ethernet controller and all five UniMAC ports.
+Connect UniMAC0 through UniMAC3 to the internal PHYs at MDIO addresses
+1 through 4 for LAN1 through LAN4.
+
+Configure UniMAC4 for a fixed gigabit RGMII link to the Marvell switch,
+with both RGMII delays supplied by the switch.
+
+Signed-off-by: Linus Walleij <linusw@kernel.org>
+
+---
+diff --git a/arch/arm/boot/dts/broadcom/bcm6846-genexis-xg6846b.dts b/arch/arm/boot/dts/broadcom/bcm6846-genexis-xg6846b.dts
+index 03aec380f516..73f688bbfa2a 100644
+--- a/arch/arm/boot/dts/broadcom/bcm6846-genexis-xg6846b.dts
++++ b/arch/arm/boot/dts/broadcom/bcm6846-genexis-xg6846b.dts
+@@ -74,6 +74,45 @@
+ 	clocks = <&osc50m>;
+ };
+ 
++&ethernet {
++	status = "okay";
++};
++
++&gmac0 {
++	label = "lan1";
++	phy-handle = <&phy1>;
++	status = "okay";
++};
++
++&gmac1 {
++	label = "lan2";
++	phy-handle = <&phy2>;
++	status = "okay";
++};
++
++&gmac2 {
++	label = "lan3";
++	phy-handle = <&phy3>;
++	status = "okay";
++};
++
++&gmac3 {
++	label = "lan4";
++	phy-handle = <&phy4>;
++	status = "okay";
++};
++
++&gmac4 {
++	/* The switch supplies the RGMII delays. */
++	phy-mode = "rgmii-id";
++	status = "okay";
++
++	fixed-link {
++		speed = <1000>;
++		full-duplex;
++	};
++};
++
+ &gpio0 {
+ 	status = "okay";
+ };

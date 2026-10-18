@@ -1,0 +1,108 @@
+From 948330d99feb1c9e5b8a63e940494f14e96e936c Mon Sep 17 00:00:00 2001
+From: Fidan Aliyeva <fidan.aliyeva.ext@ericsson.com>
+Date: Thu, 21 May 2026 22:29:22 +0200
+Subject: [PATCH] mv88e6xxx: Cache scratch config3 of 6352
+
+Changes:
+
+1. Add g2_scratch_config3 member to mv88e6xxx_chip.
+
+2. Add mv88e6352_g2_cache_global_scratch_config3  which reads the
+CONFIG3 value from the scratch register and caches it.
+
+3. Call this function in mv88e6352_reset.
+
+Co-developed-by: Thomas Eckerman <thomas.eckerman.ext@ericsson.com>
+Signed-off-by: Thomas Eckerman <thomas.eckerman.ext@ericsson.com>
+Signed-off-by: Fidan Aliyeva <fidan.aliyeva.ext@ericsson.com>
+Link: https://patch.msgid.link/20260521202924.727929-3-fidan.aliyeva.ext@ericsson.com
+Signed-off-by: Paolo Abeni <pabeni@redhat.com>
+
+---
+diff --git a/drivers/net/dsa/mv88e6xxx/chip.c b/drivers/net/dsa/mv88e6xxx/chip.c
+index f747689dfe24..f660ffdbe1b2 100644
+--- a/drivers/net/dsa/mv88e6xxx/chip.c
++++ b/drivers/net/dsa/mv88e6xxx/chip.c
+@@ -3740,13 +3740,18 @@ static int mv88e6390_setup_errata(struct mv88e6xxx_chip *chip)
+ 	return mv88e6xxx_software_reset(chip);
+ }
+ 
++/* For MV88E6XXX_FAMILY_6352, perform reset on G1 control.
++ * Also, read and cache G2 scratch register.
++ */
+ static int mv88e6352_reset(struct mv88e6xxx_chip *chip)
+ {
+ 	int err;
+ 
+ 	err = mv88e6352_g1_reset(chip);
++	if (err)
++		return err;
+ 
+-	return err;
++	return mv88e6352_g2_cache_global_scratch_config3(chip);
+ }
+ 
+ /* prod_id for switch families which do not have a PHY model number */
+diff --git a/drivers/net/dsa/mv88e6xxx/chip.h b/drivers/net/dsa/mv88e6xxx/chip.h
+index e073446ee7d0..69c256df1046 100644
+--- a/drivers/net/dsa/mv88e6xxx/chip.h
++++ b/drivers/net/dsa/mv88e6xxx/chip.h
+@@ -444,6 +444,9 @@ struct mv88e6xxx_chip {
+ 
+ 	/* FID map */
+ 	DECLARE_BITMAP(fid_bitmap, MV88E6XXX_N_FID);
++
++	/* Global2 scratch register config data3 */
++	u8 g2_scratch_config3;
+ };
+ 
+ struct mv88e6xxx_bus_ops {
+diff --git a/drivers/net/dsa/mv88e6xxx/global2.h b/drivers/net/dsa/mv88e6xxx/global2.h
+index 82f9b410de0b..ff5adf7c9bc3 100644
+--- a/drivers/net/dsa/mv88e6xxx/global2.h
++++ b/drivers/net/dsa/mv88e6xxx/global2.h
+@@ -382,6 +382,7 @@ int mv88e6390_g2_scratch_gpio_set_smi(struct mv88e6xxx_chip *chip,
+ 				      bool external);
+ int mv88e6393x_g2_scratch_gpio_set_smi(struct mv88e6xxx_chip *chip,
+ 				       bool external);
++int mv88e6352_g2_cache_global_scratch_config3(struct mv88e6xxx_chip *chip);
+ int mv88e6352_g2_scratch_port_has_serdes(struct mv88e6xxx_chip *chip, int port);
+ int mv88e6xxx_g2_atu_stats_set(struct mv88e6xxx_chip *chip, u16 kind, u16 bin);
+ int mv88e6xxx_g2_atu_stats_get(struct mv88e6xxx_chip *chip, u16 *stats);
+diff --git a/drivers/net/dsa/mv88e6xxx/global2_scratch.c b/drivers/net/dsa/mv88e6xxx/global2_scratch.c
+index 53a6d3ed63b3..f2f9e7dce1aa 100644
+--- a/drivers/net/dsa/mv88e6xxx/global2_scratch.c
++++ b/drivers/net/dsa/mv88e6xxx/global2_scratch.c
+@@ -321,6 +321,32 @@ int mv88e6393x_g2_scratch_gpio_set_smi(struct mv88e6xxx_chip *chip,
+ 	return mv88e6xxx_g2_scratch_write(chip, misc_cfg, val);
+ }
+ 
++/**
++ * mv88e6352_g2_cache_global_scratch_config3 - caches G2 CONFIG3 value
++ * @chip: chip private data
++ *
++ * Reads and stores config3 value of global2 scratch registers, which
++ * can be used to determine if the port is attached to a serdes. The
++ * value does not change once the switch is released from reset and
++ * represents the value of the pin strapping.
++ *
++ * Return: negative error number if the register read fails; otherwise, 0
++ */
++int mv88e6352_g2_cache_global_scratch_config3(struct mv88e6xxx_chip *chip)
++{
++	u8 config3;
++	int err;
++
++	err = mv88e6xxx_g2_scratch_read(chip, MV88E6352_G2_SCRATCH_CONFIG_DATA3,
++					&config3);
++	if (err)
++		return err;
++
++	chip->g2_scratch_config3 = config3;
++
++	return 0;
++}
++
+ /**
+  * mv88e6352_g2_scratch_port_has_serdes - indicate if a port can have a serdes
+  * @chip: chip private data

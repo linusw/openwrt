@@ -1,0 +1,341 @@
+From 15c76da7f7ef1c988c705bb73957073007fb79b1 Mon Sep 17 00:00:00 2001
+From: Linus Walleij <linusw@kernel.org>
+Date: Tue, 13 Oct 2026 22:09:44 +0200
+Subject: [PATCH] dt-bindings: soc: Describe the BCM6846 Processor Monitor Bus
+
+The third generation Power Management Controller (PMC3) accesses SoC
+block control and reset registers through the Processor Monitor Bus
+(PMB). Describe the BCM6846 PMB controller and its register bank.
+
+Describe clock-controller, reset-controller and hwmon child nodes with
+their own SoC-specific compatibles. Use one reset specifier
+cell on the reset controller for logical reset group IDs. Define
+BCM6846_RESET_XRDP for the coordinated reset of the packet engine and
+its three Runner cores, plus separate IDs for PCIe0, PCIe1 and PVTMON
+analog acquisition. Document the scope and prerequisites of each
+operation.
+
+Describe PVTMON temperature and voltage monitoring. Expose its single
+die-temperature sensor using a zero-cell thermal sensor specifier on the
+hwmon child node. Connect it to the sibling clock and reset controllers
+for its acquisition clock and reset.
+
+Define clock IDs for the RDP and BIU PLL outputs, Runner, crystal
+output, PVTMON and block-zone clock gates. The clock controller takes a
+50 MHz reference clock and uses a single clock specifier cell.
+
+The vendor PMB device addresses identify individual blocks, not reset
+groups, so assign logical reset IDs starting at 0. Keep the compatible
+SoC-specific because the PMB interfaces and reset groups differ between
+BCMBCA SoCs.
+
+Signed-off-by: Linus Walleij <linusw@kernel.org>
+
+---
+diff --git a/Documentation/devicetree/bindings/clock/brcm,bcm6846-pmb-clock.yaml b/Documentation/devicetree/bindings/clock/brcm,bcm6846-pmb-clock.yaml
+new file mode 100644
+index 000000000000..42f0f1befcaf
+--- /dev/null
++++ b/Documentation/devicetree/bindings/clock/brcm,bcm6846-pmb-clock.yaml
+@@ -0,0 +1,41 @@
++# SPDX-License-Identifier: (GPL-2.0-only OR BSD-2-Clause)
++%YAML 1.2
++---
++$id: http://devicetree.org/schemas/clock/brcm,bcm6846-pmb-clock.yaml#
++$schema: http://devicetree.org/meta-schemas/core.yaml#
++
++title: Broadcom BCM6846 PMB clocks
++
++maintainers:
++  - Linus Walleij <linusw@kernel.org>
++
++description:
++  The Processor Monitor Bus (PMB) provides access to the RDP and BIU PLL
++  outputs, the Runner clock, the crystal output, the PVTMON acquisition
++  clock and the clock gates in block power-control zones. Clock indices
++  are defined in dt-bindings/clock/brcm,bcm6846-pmb.h.
++
++  This controller is a child of the PMB and shares its indirect register
++  interface. The PLLs and crystal output use a 50 MHz reference clock.
++  Zone clocks require their associated blocks to be powered.
++
++properties:
++  compatible:
++    const: brcm,bcm6846-pmb-clock
++
++  clocks:
++    maxItems: 1
++
++  clock-names:
++    const: ref
++
++  '#clock-cells':
++    const: 1
++
++required:
++  - compatible
++  - clocks
++  - clock-names
++  - '#clock-cells'
++
++additionalProperties: false
+diff --git a/Documentation/devicetree/bindings/hwmon/brcm,bcm6846-pmb-pvtmon.yaml b/Documentation/devicetree/bindings/hwmon/brcm,bcm6846-pmb-pvtmon.yaml
+new file mode 100644
+index 000000000000..a0ce1569603c
+--- /dev/null
++++ b/Documentation/devicetree/bindings/hwmon/brcm,bcm6846-pmb-pvtmon.yaml
+@@ -0,0 +1,45 @@
++# SPDX-License-Identifier: (GPL-2.0-only OR BSD-2-Clause)
++%YAML 1.2
++---
++$id: http://devicetree.org/schemas/hwmon/brcm,bcm6846-pmb-pvtmon.yaml#
++$schema: http://devicetree.org/meta-schemas/core.yaml#
++
++title: Broadcom BCM6846 PMB process, voltage and temperature monitor
++
++maintainers:
++  - Linus Walleij <linusw@kernel.org>
++
++description:
++  The process, voltage and temperature monitor (PVTMON) is a child of
++  the Processor Monitor Bus (PMB) controller and uses its indirect
++  register interface. It measures die temperature and seven voltages,
++  including a diagnostic test input. Only the temperature channel is a thermal sensor.
++
++  Acquisition is shared with Power Management Controller (PMC) firmware.
++  Resetting PVTMON affects all acquisition channels.
++
++allOf:
++  - $ref: /schemas/thermal/thermal-sensor.yaml#
++
++properties:
++  compatible:
++    const: brcm,bcm6846-pmb-pvtmon
++
++  clocks:
++    maxItems: 1
++    description: PVTMON acquisition clock
++
++  resets:
++    maxItems: 1
++    description: PVTMON analog-acquisition reset
++
++  '#thermal-sensor-cells':
++    const: 0
++
++required:
++  - compatible
++  - clocks
++  - resets
++  - '#thermal-sensor-cells'
++
++additionalProperties: false
+diff --git a/Documentation/devicetree/bindings/reset/brcm,bcm6846-pmb-reset.yaml b/Documentation/devicetree/bindings/reset/brcm,bcm6846-pmb-reset.yaml
+new file mode 100644
+index 000000000000..63727bc55d77
+--- /dev/null
++++ b/Documentation/devicetree/bindings/reset/brcm,bcm6846-pmb-reset.yaml
+@@ -0,0 +1,44 @@
++# SPDX-License-Identifier: (GPL-2.0-only OR BSD-2-Clause)
++%YAML 1.2
++---
++$id: http://devicetree.org/schemas/reset/brcm,bcm6846-pmb-reset.yaml#
++$schema: http://devicetree.org/meta-schemas/core.yaml#
++
++title: Broadcom BCM6846 Processor Monitor Bus reset controller
++
++maintainers:
++  - Linus Walleij <linusw@kernel.org>
++
++description:
++  The reset controller is a child of the Processor Monitor Bus (PMB)
++  controller and uses its indirect register interface.
++
++  Each reset specifier identifies a logical reset group, which may span
++  several blocks that must be reset together. Blocks must be powered and
++  all affected users quiesced before requesting a reset.
++
++  BCM6846_RESET_XRDP covers the XRDP packet engine and three separate Runner
++  cores. All participating blocks are asserted before any is released.
++  The bus interfaces remain accessible throughout the reset.
++
++  BCM6846_RESET_PCIE0 and BCM6846_RESET_PCIE1 pulse the PCIe PMB soft
++  resets, including IDDQ, while preserving the lane-selection straps.
++  These are separate from PCIe PERST and the controller-local resets.
++
++  BCM6846_RESET_PVTMON resets analog acquisition in the process, voltage
++  and temperature monitor. Its clock and power configuration are retained.
++  Users must coordinate with any firmware performing voltage monitoring.
++
++properties:
++  compatible:
++    const: brcm,bcm6846-pmb-reset
++
++  '#reset-cells':
++    const: 1
++    description: Reset group ID from dt-bindings/reset/brcm,bcm6846-pmb.h
++
++required:
++  - compatible
++  - '#reset-cells'
++
++additionalProperties: false
+diff --git a/Documentation/devicetree/bindings/soc/bcm/brcm,bcm6846-pmb.yaml b/Documentation/devicetree/bindings/soc/bcm/brcm,bcm6846-pmb.yaml
+new file mode 100644
+index 000000000000..db5a74d926b8
+--- /dev/null
++++ b/Documentation/devicetree/bindings/soc/bcm/brcm,bcm6846-pmb.yaml
+@@ -0,0 +1,84 @@
++# SPDX-License-Identifier: (GPL-2.0-only OR BSD-2-Clause)
++%YAML 1.2
++---
++$id: http://devicetree.org/schemas/soc/bcm/brcm,bcm6846-pmb.yaml#
++$schema: http://devicetree.org/meta-schemas/core.yaml#
++
++title: Broadcom BCM6846 Processor Monitor Bus
++
++maintainers:
++  - Linus Walleij <linusw@kernel.org>
++
++description:
++  The Processor Monitor Bus (PMB) connects the third generation Power
++  Management Controller (PMC3) to the control registers of SoC blocks.
++  The controller provides configuration, arbitration and four keyhole
++  interfaces for indirect register access, including the reset registers
++  of SoC blocks.
++
++  The PMB interface is part of Procmon within the PMC complex and is
++  described by its bus child node. The register bank starts at the
++  PMB configuration register, not at the beginning of Procmon.
++
++  Child nodes describe the clock and reset controllers and the process,
++  voltage and temperature monitor (PVTMON), accessed through the shared
++  PMB interface.
++
++properties:
++  compatible:
++    const: brcm,bcm6846-pmb
++
++  reg:
++    maxItems: 1
++    description: PMB configuration, keyhole and address mapping registers
++
++  clock-controller:
++    type: object
++    $ref: /schemas/clock/brcm,bcm6846-pmb-clock.yaml#
++
++  reset-controller:
++    type: object
++    $ref: /schemas/reset/brcm,bcm6846-pmb-reset.yaml#
++
++  hwmon:
++    type: object
++    $ref: /schemas/hwmon/brcm,bcm6846-pmb-pvtmon.yaml#
++
++required:
++  - compatible
++  - reg
++  - clock-controller
++  - reset-controller
++  - hwmon
++
++additionalProperties: false
++
++examples:
++  - |
++    #include <dt-bindings/clock/brcm,bcm6846-pmb.h>
++    #include <dt-bindings/reset/brcm,bcm6846-pmb.h>
++
++    /* Called PMB Processor Monitor Bus in vendor tree */
++    bus@ffb20100 {
++        compatible = "brcm,bcm6846-pmb";
++        reg = <0xffb20100 0x200>;
++
++        pmb_clk: clock-controller {
++            compatible = "brcm,bcm6846-pmb-clock";
++            clocks = <&osc50m>;
++            clock-names = "ref";
++            #clock-cells = <1>;
++        };
++
++        pmb_reset: reset-controller {
++            compatible = "brcm,bcm6846-pmb-reset";
++            #reset-cells = <1>;
++        };
++
++        hwmon {
++            compatible = "brcm,bcm6846-pmb-pvtmon";
++            clocks = <&pmb_clk BCM6846_CLK_PVTMON>;
++            resets = <&pmb_reset BCM6846_RESET_PVTMON>;
++            #thermal-sensor-cells = <0>;
++        };
++    };
+diff --git a/include/dt-bindings/clock/brcm,bcm6846-pmb.h b/include/dt-bindings/clock/brcm,bcm6846-pmb.h
+new file mode 100644
+index 000000000000..548a18ed7959
+--- /dev/null
++++ b/include/dt-bindings/clock/brcm,bcm6846-pmb.h
+@@ -0,0 +1,42 @@
++/* SPDX-License-Identifier: (GPL-2.0-only OR BSD-2-Clause) */
++#ifndef _DT_BINDINGS_CLOCK_BRCM_BCM6846_PMB_H
++#define _DT_BINDINGS_CLOCK_BRCM_BCM6846_PMB_H
++
++#define BCM6846_CLK_RDPPLL_CH0	0
++#define BCM6846_CLK_RDPPLL_CH1	1
++#define BCM6846_CLK_RDPPLL_CH2	2
++#define BCM6846_CLK_RDPPLL_CH3	3
++#define BCM6846_CLK_RDPPLL_CH4	4
++#define BCM6846_CLK_RDPPLL_CH5	5
++#define BCM6846_CLK_BIUPLL_CH0	6
++#define BCM6846_CLK_BIUPLL_CH1	7
++#define BCM6846_CLK_BIUPLL_CH2	8
++#define BCM6846_CLK_BIUPLL_CH3	9
++#define BCM6846_CLK_BIUPLL_CH4	10
++#define BCM6846_CLK_BIUPLL_CH5	11
++#define BCM6846_CLK_RUNNER	12
++#define BCM6846_CLK_XTAL_OUT	13
++#define BCM6846_CLK_PVTMON	14
++#define BCM6846_CLK_PERIPH_ZONE0	15
++#define BCM6846_CLK_PERIPH_ZONE1	16
++#define BCM6846_CLK_PERIPH_ZONE2	17
++#define BCM6846_CLK_PERIPH_ZONE3	18
++#define BCM6846_CLK_MEMC		19
++#define BCM6846_CLK_USB_ZONE0	20
++#define BCM6846_CLK_USB_ZONE1	21
++#define BCM6846_CLK_USB_ZONE2	22
++#define BCM6846_CLK_USB_ZONE3	23
++#define BCM6846_CLK_WAN_ZONE0	24
++#define BCM6846_CLK_WAN_ZONE1	25
++#define BCM6846_CLK_WAN_ZONE2	26
++#define BCM6846_CLK_XRDP_ZONE0	27
++#define BCM6846_CLK_XRDP_ZONE1	28
++#define BCM6846_CLK_XRDP_ZONE2	29
++#define BCM6846_CLK_RUNNER0	30
++#define BCM6846_CLK_RUNNER1	31
++#define BCM6846_CLK_RUNNER2	32
++#define BCM6846_CLK_PCIE0		33
++#define BCM6846_CLK_PCIE1		34
++#define BCM6846_CLK_BIU		35
++
++#endif
+diff --git a/include/dt-bindings/reset/brcm,bcm6846-pmb.h b/include/dt-bindings/reset/brcm,bcm6846-pmb.h
+new file mode 100644
+index 000000000000..3cf31ddcb66c
+--- /dev/null
++++ b/include/dt-bindings/reset/brcm,bcm6846-pmb.h
+@@ -0,0 +1,15 @@
++/* SPDX-License-Identifier: (GPL-2.0-only OR BSD-2-Clause) */
++#ifndef _DT_BINDINGS_RESET_BRCM_BCM6846_PMB_H
++#define _DT_BINDINGS_RESET_BRCM_BCM6846_PMB_H
++
++/* XRDP packet engine and its three Runner cores. */
++#define BCM6846_RESET_XRDP	0
++
++/* PCIe PMB soft resets, preserving the lane configuration. */
++#define BCM6846_RESET_PCIE0	1
++#define BCM6846_RESET_PCIE1	2
++
++/* Process, voltage and temperature monitor analog acquisition reset. */
++#define BCM6846_RESET_PVTMON	3
++
++#endif

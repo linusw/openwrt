@@ -1,0 +1,27 @@
+# SPDX-License-Identifier: GPL-2.0-only
+
+bcmbca_preinit_network() {
+	[ "$(board_name)" = "genexis,xg6846b" ] || return 0
+
+	# eth4 is initially the XRDP conduit for the Marvell DSA switch.
+	# Expose the physical copper WAN as eth4, as on the vendor firmware.
+	if [ -d /sys/class/net/wan ] && [ ! -d /sys/class/net/wan-cpu ]; then
+		ip link set dev eth4 down
+		ip link set dev eth4 name wan-cpu || return 1
+		ip link set dev wan name eth4 || return 1
+	fi
+
+	local loader mac port
+	loader="$(find_mtd_chardev loader)"
+	[ -n "$loader" ] || return 0
+	for port in 0 1 2 3 4; do
+		mac="$(bcmbca-nvram "$loader" "$port")" || continue
+		ip link set dev "eth$port" address "$mac"
+		[ "$port" != 4 ] || {
+			ip link set dev wan-cpu address "$mac"
+			ip link set dev sfp address "$mac"
+		}
+	done
+}
+
+boot_hook_add preinit_main bcmbca_preinit_network

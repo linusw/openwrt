@@ -1,0 +1,44 @@
+From e4a9173e38ee06b89e44801267cd9c6b85007249 Mon Sep 17 00:00:00 2001
+From: Fidan Aliyeva <fidan.aliyeva.ext@ericsson.com>
+Date: Thu, 21 May 2026 22:29:24 +0200
+Subject: [PATCH] mv88e6xxx: Remove locks for 6352's has_serdes
+
+There is no register access anymore in
+mv88e6352_g2_scratch_port_has_serdes. So, remove the locks
+surrounding the function.
+
+Co-developed-by: Thomas Eckerman <thomas.eckerman.ext@ericsson.com>
+Signed-off-by: Thomas Eckerman <thomas.eckerman.ext@ericsson.com>
+Signed-off-by: Fidan Aliyeva <fidan.aliyeva.ext@ericsson.com>
+Link: https://patch.msgid.link/20260521202924.727929-5-fidan.aliyeva.ext@ericsson.com
+Signed-off-by: Paolo Abeni <pabeni@redhat.com>
+
+---
+diff --git a/drivers/net/dsa/mv88e6xxx/pcs-6352.c b/drivers/net/dsa/mv88e6xxx/pcs-6352.c
+index e09019ed19fb..6ff198093df1 100644
+--- a/drivers/net/dsa/mv88e6xxx/pcs-6352.c
++++ b/drivers/net/dsa/mv88e6xxx/pcs-6352.c
+@@ -329,9 +329,7 @@ static int mv88e6352_pcs_init(struct mv88e6xxx_chip *chip, int port)
+ 	unsigned int irq;
+ 	int err;
+ 
+-	mv88e6xxx_reg_lock(chip);
+ 	err = mv88e6352_g2_scratch_port_has_serdes(chip, port);
+-	mv88e6xxx_reg_unlock(chip);
+ 	if (err <= 0)
+ 		return err;
+ 
+diff --git a/drivers/net/dsa/mv88e6xxx/serdes.c b/drivers/net/dsa/mv88e6xxx/serdes.c
+index a936ee80ce00..d3d3c121a32d 100644
+--- a/drivers/net/dsa/mv88e6xxx/serdes.c
++++ b/drivers/net/dsa/mv88e6xxx/serdes.c
+@@ -202,9 +202,7 @@ int mv88e6352_serdes_get_regs_len(struct mv88e6xxx_chip *chip, int port)
+ {
+ 	int err;
+ 
+-	mv88e6xxx_reg_lock(chip);
+ 	err = mv88e6352_g2_scratch_port_has_serdes(chip, port);
+-	mv88e6xxx_reg_unlock(chip);
+ 	if (err <= 0)
+ 		return err;
+ 

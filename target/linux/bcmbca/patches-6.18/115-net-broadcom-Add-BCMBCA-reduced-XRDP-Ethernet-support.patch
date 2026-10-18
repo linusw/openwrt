@@ -1,0 +1,1625 @@
+From 8b0fad44c189da8bb39f5afbaf4d1dc6829b8c94 Mon Sep 17 00:00:00 2001
+From: Linus Walleij <linusw@kernel.org>
+Date: Tue, 13 Oct 2026 11:46:35 +0200
+Subject: [PATCH] net: broadcom: Add BCMBCA reduced XRDP Ethernet support
+
+Add support for the BCMBCA XRDP packet engine, initially for the five
+UniMAC ports on BCM6846. Use Broadcom's reduced Runner program to
+transfer packets through on-chip SRAM, with a shared polling worker
+and per-port transmit queues. The SRAM Buffer Pool Manager (SBPM)
+allocates and recycles 128-byte buffers, which are linked together
+to hold larger packets.
+
+The SRAM is dedicated to the XRDP datapath as a packet assembly
+buffer, not general-purpose SRAM. SBPM manages its buffer ownership,
+so it remains an XRDP resource rather than a generic SRAM pool.
+
+Use SoC match data for the register layout, SRAM buffer and port counts,
+Runner count and initialization program, SBPM source addresses and
+packet table locations. Per-port data describes the MAC, MIB, BBH and
+RGMII registers, transmit destination and completion counter. Vendor
+implementations vary these locations and mappings across BCMBCA SoCs.
+Match only the BCM6846 compatible: the packet descriptors use the GEN45
+SBPM format, and other generations also require different packet APIs
+or MAC support.
+
+Use the PMB reset and clock providers to power up and reset the XRDP
+group, then prepare and enable its clocks before accessing registers or
+initializing the packet pool. Quiesce the datapath before releasing the
+clocks on probe failure, removal and shutdown. Keep the firmware PLL
+configuration.
+Validate receive descriptors and buffer lists before releasing them,
+and stop packet processing if an SBPM command fails in a way that
+leaves buffer ownership uncertain.
+
+Use phylink for the internal GMII PHYs and the external RGMII port.
+Support DSA frame overhead and expose UniMAC packet and error counters
+through ethtool.
+
+Power up the shared BCM6846 QEGPHY block before attaching any internal
+PHY. Follow the vendor reset, clock and power sequence while holding
+the MDIO bus lock, preserve the discovered MDIO base address and enable
+only the internal ports described in DT. The Broadcom PHY driver handles
+subsequent per-PHY calibration. Hold RTNL when disconnecting PHYs during
+probe failure and teardown.
+
+Firmware must configure pin multiplexing and external PHYs before Linux
+starts. Packet transfers use polling and CPU copies.
+
+Signed-off-by: Linus Walleij <linusw@kernel.org>
+
+---
+diff --git a/drivers/net/ethernet/broadcom/Kconfig b/drivers/net/ethernet/broadcom/Kconfig
+index 47e9ece4b37a..b159e7e21d01 100644
+--- a/drivers/net/ethernet/broadcom/Kconfig
++++ b/drivers/net/ethernet/broadcom/Kconfig
+@@ -68,6 +68,24 @@ config BCM63XX_ENET
+ 	  This driver supports the ethernet MACs in the Broadcom 63xx
+ 	  MIPS chipset family (BCM63XX).
+ 
++config BCMBCA_XRDP_ETH
++	tristate "Broadcom BCMBCA reduced XRDP Ethernet"
++	depends on ARCH_BCMBCA || COMPILE_TEST
++	depends on COMMON_CLK && OF && HAS_IOMEM
++	depends on RESET_CONTROLLER
++	select CLK_BCMBCA_PMB
++	select MFD_BCMBCA_PMB
++	select PHYLINK
++	select RESET_BCMBCA_PMB
++	help
++	  Ethernet support for the BCMBCA XRDP packet engine using Broadcom's
++	  reduced Runner program and on-chip packet SRAM. Currently supports
++	  BCM6846. Packet transfers use polling.
++	  Firmware must have configured pin multiplexing and external PHYs
++	  before Linux starts.
++
++	  The module will be called bcmbca_xrdp.
++
+ config BCMGENET
+ 	tristate "Broadcom GENET internal MAC support"
+ 	depends on HAS_IOMEM
+diff --git a/drivers/net/ethernet/broadcom/Makefile b/drivers/net/ethernet/broadcom/Makefile
+index 10cc1c92ecfc..7f0d77ce0873 100644
+--- a/drivers/net/ethernet/broadcom/Makefile
++++ b/drivers/net/ethernet/broadcom/Makefile
+@@ -6,6 +6,7 @@
+ obj-$(CONFIG_B44) += b44.o
+ obj-$(CONFIG_BCM4908_ENET) += bcm4908_enet.o
+ obj-$(CONFIG_BCM63XX_ENET) += bcm63xx_enet.o
++obj-$(CONFIG_BCMBCA_XRDP_ETH) += bcmbca_xrdp.o
+ obj-$(CONFIG_BCMGENET) += genet/
+ obj-$(CONFIG_BNX2) += bnx2.o
+ obj-$(CONFIG_CNIC) += cnic.o
+diff --git a/drivers/net/ethernet/broadcom/bcm6846_enet_data.h b/drivers/net/ethernet/broadcom/bcm6846_enet_data.h
+new file mode 100644
+index 000000000000..683870ef1efa
+--- /dev/null
++++ b/drivers/net/ethernet/broadcom/bcm6846_enet_data.h
+@@ -0,0 +1,351 @@
++/* SPDX-License-Identifier: GPL-2.0-or-later */
++/*
++ * Copyright 2019 Broadcom Ltd.
++ *
++ * BCM6846 reduced XRDP initialization and Runner program, from Broadcom's
++ * GPL U-Boot drivers/net/bcmbca/xrdp/data_path_6846.c.
++ * Keep the recorded write ordering and byte order intact. The transmit
++ * front-end FIFO layout follows the BCM6846 CFE/PON_6846 configuration:
++ * 320 eight-byte entries and 40 descriptors per queue, with unused queue
++ * 6/7 bases at zero. Size fields encode the entry count minus one.
++ */
++static const struct bcmbca_xrdp_init_entry bcm6846_init_data[] = {
++	{ 0x40d97004, 0x82d00000 }, { 0x40d97008, 0xffe00000 }, { 0x40d9700c, 0x82e00000 },
++	{ 0x40d97010, 0xffe00000 }, { 0x40d96008, 0x00020002 }, { 0x40140004, 0x82140000 },
++	{ 0x40140008, 0x000c0000 }, { 0x4014000c, 0x82100000 }, { 0x40140010, 0x000c0000 },
++	{ 0x40140014, 0x82180000 }, { 0x40140018, 0x000c0000 }, { 0x05c00000, 0x00000000 },
++	{ 0x02000000, 0x00004000 }, { 0x82c00000, 0x00000000 }, { 0x02000000, 0x00000800 },
++	{ 0x82c18000, 0x00000000 }, { 0x03000000, 0x00002000 }, { 0x82c10000, 0xfc000000 },
++	{ 0x41c10000, 0x06008006 }, { 0x41c1000c, 0x1a008006 }, { 0x41c10018, 0x42061032 },
++	{ 0x41c1001c, 0x83062032 }, { 0x41c10020, 0x00000024 }, { 0x41c10024, 0x03074032 },
++	{ 0x41c10028, 0x83076032 }, { 0x41c1002c, 0x05f8040a }, { 0x41c10030, 0x00c094ac },
++	{ 0x41c10034, 0x00008020 }, { 0x41c10038, 0x740180b0 }, { 0x41c1003c, 0x230104cc },
++	{ 0x41c10040, 0x00b8d9ac }, { 0x41c10044, 0xf4ffc3b0 }, { 0x41c10048, 0x80a10684 },
++	{ 0x41c1004c, 0x19800006 }, { 0x41c10050, 0x0e18d4a8 }, { 0x41c10054, 0x0400c0b0 },
++	{ 0x41c10058, 0x00008020 }, { 0x41c1005c, 0x040380b0 }, { 0x41c10060, 0x862104cc },
++	{ 0x41c10064, 0x00000020 }, { 0x41c10068, 0x022c0036 }, { 0x41c1006c, 0x422c1036 },
++	{ 0x41c10070, 0x832c2036 }, { 0x41c10074, 0x032d4036 }, { 0x41c10078, 0x832d6036 },
++	{ 0x41c1007c, 0x032e8036 }, { 0x41c10080, 0x832ea036 }, { 0x41c10084, 0x032fc036 },
++	{ 0x41c10088, 0x832fe036 }, { 0x41c1008c, 0x03300037 }, { 0x41c10090, 0x83302037 },
++	{ 0x41c10094, 0x03314037 }, { 0x41c10098, 0x83316037 }, { 0x41c1009c, 0x03328037 },
++	{ 0x41c100a0, 0x8332a037 }, { 0x41c100a4, 0x0333c037 }, { 0x41c100a8, 0x8333e037 },
++	{ 0x41c100ac, 0x820080c6 }, { 0x41c100b0, 0x001684ac }, { 0x41c100b4, 0xc20e8036 },
++	{ 0x41c100b8, 0x2f602002 }, { 0x41c100bc, 0x30602002 }, { 0x41c100c0, 0x31602002 },
++	{ 0x41c100c4, 0x000000c2 }, { 0x41c100c8, 0x33602002 }, { 0x41c100cc, 0x34602002 },
++	{ 0x41c100d0, 0x35602002 }, { 0x41c100d4, 0x022c0032 }, { 0x41c100d8, 0x422c1032 },
++	{ 0x41c100dc, 0x832c2032 }, { 0x41c100e0, 0x032d4032 }, { 0x41c100e4, 0x832d6032 },
++	{ 0x41c100e8, 0x032e8032 }, { 0x41c100ec, 0x832ea032 }, { 0x41c100f0, 0x032fc032 },
++	{ 0x41c100f4, 0x832fe032 }, { 0x41c100f8, 0x03300033 }, { 0x41c100fc, 0x83302033 },
++	{ 0x41c10100, 0x03314033 }, { 0x41c10104, 0x83316033 }, { 0x41c10108, 0x03328033 },
++	{ 0x41c1010c, 0x8332a033 }, { 0x41c10110, 0x0333c033 }, { 0x41c10114, 0x8333e033 },
++	{ 0x41c10124, 0x01008022 }, { 0x41c10134, 0x4400c0b0 }, { 0x41c10138, 0x040080b0 },
++	{ 0x41c1013c, 0x0001c69e }, { 0x41c10140, 0x8001c480 }, { 0x41c10144, 0x140040b0 },
++	{ 0x41c1014c, 0x02008630 }, { 0x41c10150, 0x80008480 }, { 0x41c10154, 0x02008634 },
++	{ 0x41c10158, 0x26008632 }, { 0x41c1015c, 0x80008482 }, { 0x41c10160, 0x26008636 },
++	{ 0x41c10164, 0x47002833 }, { 0x41c10168, 0x0300e830 }, { 0x41c1016c, 0x402689ac },
++	{ 0x41c10170, 0x507c890a }, { 0x41c10174, 0xc0aa87ad }, { 0x41c10178, 0x20004497 },
++	{ 0x41c1017c, 0x0400d0b0 }, { 0x41c10180, 0x040080b0 }, { 0x41c10184, 0x0081d69e },
++	{ 0x41c10188, 0xa0018480 }, { 0x41c1018c, 0x00b8c7ac }, { 0x41c10190, 0x040060b1 },
++	{ 0x41c10194, 0x0200d430 }, { 0x41c10198, 0x8080d680 }, { 0x41c1019c, 0x0200d434 },
++	{ 0x41c101a0, 0x2600d432 }, { 0x41c101a4, 0x8081d680 }, { 0x41c101a8, 0x8080d682 },
++	{ 0x41c101ac, 0x2600d436 }, { 0x41c101b0, 0x040070b1 }, { 0x41c101b4, 0x0400e0b0 },
++	{ 0x41c101b8, 0x06a0a4a8 }, { 0x41c101bc, 0x1f0462a9 }, { 0x41c101c0, 0x061c60a9 },
++	{ 0x41c101c4, 0x85c24431 }, { 0x41c101c8, 0x040080b0 }, { 0x41c101cc, 0x0400d0b0 },
++	{ 0x41c101d0, 0x1f0470a9 }, { 0x41c101d4, 0x07a4e5a8 }, { 0x41c101d8, 0x0628aca8 },
++	{ 0x41c101dc, 0x001860a9 }, { 0x41c101e0, 0x79156aa9 }, { 0x41c101e4, 0x0ec889a8 },
++	{ 0x41c101e8, 0x02b8d7a8 }, { 0x41c101ec, 0x1d0470a9 }, { 0x41c101f0, 0x26805833 },
++	{ 0x41c101f8, 0x9ae03a02 }, { 0x41c101fc, 0x47806837 }, { 0x41c10200, 0x06808836 },
++	{ 0x41c10204, 0x2680d836 }, { 0x41c10208, 0x044080b0 }, { 0x41c1020c, 0x00821883 },
++	{ 0x41c10210, 0x1400d0b0 }, { 0x41c10214, 0x08811889 }, { 0x41c10218, 0x040080b0 },
++	{ 0x41c1021c, 0x0081d69e }, { 0x41c10220, 0xa0018480 }, { 0x41c1022c, 0x0200d430 },
++	{ 0x41c10230, 0x8080d680 }, { 0x41c10234, 0x0200d434 }, { 0x41c10238, 0x2600d432 },
++	{ 0x41c1023c, 0x8081c680 }, { 0x41c10240, 0x8000c682 }, { 0x41c10244, 0x2600c436 },
++	{ 0x41c10248, 0x06a0a4a8 }, { 0x41c1024c, 0x090005cc }, { 0x41c10250, 0x1f0422a9 },
++	{ 0x41c10254, 0x6e1dfaa8 }, { 0x41c10258, 0x0628aca8 }, { 0x41c1025c, 0x47130024 },
++	{ 0x41c10260, 0xc84125cd }, { 0x41c10268, 0x340090b1 }, { 0x41c1026c, 0x040050b1 },
++	{ 0x41c10270, 0x00819c9f }, { 0x41c10274, 0x20835a81 }, { 0x41c10280, 0x02809a31 },
++	{ 0x41c10284, 0x80809c81 }, { 0x41c10288, 0x02809a35 }, { 0x41c1028c, 0x26809a33 },
++	{ 0x41c10290, 0x80819c81 }, { 0x41c10294, 0x80809c83 }, { 0x41c10298, 0x26809a37 },
++	{ 0x41c1029c, 0x240050b1 }, { 0x41c102a0, 0x02ae0ac2 }, { 0x41c102a4, 0x061f0024 },
++	{ 0x41c102b0, 0x2400c0b0 }, { 0x41c102b4, 0x040080b0 }, { 0x41c102b8, 0x0001c69e },
++	{ 0x41c102bc, 0x80018480 }, { 0x41c102c0, 0x85c24431 }, { 0x41c102c8, 0x0200c430 },
++	{ 0x41c102cc, 0x8000c680 }, { 0x41c102d0, 0x0200c434 }, { 0x41c102d4, 0x2600c432 },
++	{ 0x41c102d8, 0x8000c682 }, { 0x41c102dc, 0x10008007 }, { 0x41c102e0, 0x2600c436 },
++	{ 0x41c102e4, 0x240180b0 }, { 0x41c102e8, 0x92000006 }, { 0x41c102ec, 0x0400a0b0 },
++	{ 0x41c102f0, 0x0408b0b0 }, { 0x41c102f4, 0x0001a59e }, { 0x41c102f8, 0x4081a580 },
++	{ 0x41c102fc, 0x140040b0 }, { 0x41c10304, 0x0200b530 }, { 0x41c10308, 0x8080b580 },
++	{ 0x41c1030c, 0x0200b534 }, { 0x41c10310, 0x2600b532 }, { 0x41c10314, 0x8080b582 },
++	{ 0x41c10318, 0x2600b536 }, { 0x41c1031c, 0x0300e430 }, { 0x41c10320, 0x4700c432 },
++	{ 0x41c10324, 0x0280a430 }, { 0x41c10328, 0xc141c5cc }, { 0x41c1032c, 0xc72e0024 },
++	{ 0x41c10330, 0x26000436 }, { 0x40d0004c, 0x00000004 }, { 0x40d0104c, 0x00000002 },
++	{ 0x40d0104c, 0x00000002 }, { 0x40d00044, 0x00000826 }, { 0x41c00060, 0x00000000 },
++	{ 0x41c00064, 0x01000000 }, { 0x41c00068, 0x00000000 }, { 0x41c0006c, 0x00000000 },
++	{ 0x41c00070, 0x00000000 }, { 0x41c00074, 0x00000000 }, { 0x41c00078, 0x00000000 },
++	{ 0x41c0007c, 0x00000000 }, { 0x41c18000, 0x00000000 }, { 0x41c18004, 0x00000004 },
++	{ 0x41c18008, 0x12000000 }, { 0x41c1800c, 0x00000000 }, { 0x41c18010, 0x00000000 },
++	{ 0x41c18014, 0x00000000 }, { 0x41c18018, 0x00000000 }, { 0x41c1801c, 0x00000000 },
++	{ 0x41c18020, 0x40013401 }, { 0x41c18024, 0x00080000 }, { 0x41c18028, 0x00000000 },
++	{ 0x41c1802c, 0x00000000 }, { 0x41c18030, 0x00000000 }, { 0x41c18034, 0x00000000 },
++	{ 0x41c18038, 0x00000000 }, { 0x41c1803c, 0x00000000 }, { 0x41c18040, 0x00000000 },
++	{ 0x41c18044, 0x00000000 }, { 0x41c18048, 0x00000000 }, { 0x41c1804c, 0x00000000 },
++	{ 0x41c18050, 0x00000000 }, { 0x41c18054, 0x00000000 }, { 0x41c18058, 0x00000000 },
++	{ 0x41c1805c, 0x00000000 }, { 0x41c18060, 0x50000000 }, { 0x41c18064, 0xdc000000 },
++	{ 0x41c18068, 0x00000000 }, { 0x41c1806c, 0x00000000 }, { 0x41c18070, 0x00000000 },
++	{ 0x41c18074, 0x00000000 }, { 0x41c18078, 0x00000000 }, { 0x41c1807c, 0x00000000 },
++	{ 0x41c18080, 0x0000ec02 }, { 0x41c18084, 0x00000000 }, { 0x41c18088, 0x00000000 },
++	{ 0x41c1808c, 0x00000000 }, { 0x41c18090, 0x00000000 }, { 0x41c18094, 0x00000000 },
++	{ 0x41c18098, 0x00000000 }, { 0x41c1809c, 0x00000000 }, { 0x41c180a0, 0x00000000 },
++	{ 0x41c180a4, 0x00000000 }, { 0x41c180a8, 0x00000000 }, { 0x41c180ac, 0x00000000 },
++	{ 0x41c180b0, 0x00000000 }, { 0x41c180b4, 0x00000000 }, { 0x41c180b8, 0x00000000 },
++	{ 0x41c180bc, 0x00000000 }, { 0x41c180c0, 0x00000000 }, { 0x41c180c4, 0x00000000 },
++	{ 0x41c180c8, 0x00000000 }, { 0x41c180cc, 0x00000000 }, { 0x41c180d0, 0x00000000 },
++	{ 0x41c180d4, 0x00000000 }, { 0x41c180d8, 0x00000000 }, { 0x41c180dc, 0x00000000 },
++	{ 0x41c180e0, 0x00000000 }, { 0x41c180e4, 0x00000000 }, { 0x41c180e8, 0x00000000 },
++	{ 0x41c180ec, 0x00000000 }, { 0x41c180f0, 0x00000000 }, { 0x41c180f4, 0x00000000 },
++	{ 0x41c180f8, 0x00000000 }, { 0x41c180fc, 0x00000000 }, { 0x41c18100, 0x00000000 },
++	{ 0x41c18104, 0x00000000 }, { 0x41c18108, 0x00000000 }, { 0x41c1810c, 0x00000000 },
++	{ 0x41c18110, 0x00000000 }, { 0x41c18114, 0x00000000 }, { 0x41c18118, 0x00000000 },
++	{ 0x41c1811c, 0x00000000 }, { 0x41c18120, 0x00000000 }, { 0x41c18124, 0x00000000 },
++	{ 0x41c18128, 0x00000000 }, { 0x41c1812c, 0x00000000 }, { 0x41c18130, 0x00000000 },
++	{ 0x41c18134, 0x00000000 }, { 0x41c18138, 0x00000000 }, { 0x41c1813c, 0x00000000 },
++	{ 0x41c18140, 0x00000000 }, { 0x41c18144, 0x00000000 }, { 0x41c18148, 0x00000000 },
++	{ 0x41c1814c, 0x00000000 }, { 0x41c18150, 0x00000000 }, { 0x41c18154, 0x00000000 },
++	{ 0x41c18158, 0x00000000 }, { 0x41c1815c, 0x00000000 }, { 0x41c18160, 0x00000000 },
++	{ 0x41c18164, 0x00000000 }, { 0x41c18168, 0x00000000 }, { 0x41c1816c, 0x00000000 },
++	{ 0x41c18170, 0x00000000 }, { 0x41c18174, 0x00000000 }, { 0x41c18178, 0x00000000 },
++	{ 0x41c1817c, 0x00000000 }, { 0x41c18180, 0x00000000 }, { 0x41c18184, 0x00000000 },
++	{ 0x41c18188, 0x00000000 }, { 0x41c1818c, 0x00000000 }, { 0x41c18190, 0x00000000 },
++	{ 0x41c18194, 0x00000000 }, { 0x41c18198, 0x00000000 }, { 0x41c1819c, 0x00000000 },
++	{ 0x41c181a0, 0x00000000 }, { 0x41c181a4, 0x00000000 }, { 0x41c181a8, 0x00000000 },
++	{ 0x41c181ac, 0x00000000 }, { 0x41c181b0, 0x00000000 }, { 0x41c181b4, 0x00000000 },
++	{ 0x41c181b8, 0x00000000 }, { 0x41c181bc, 0x00000000 }, { 0x41c181c0, 0x00000000 },
++	{ 0x41c181c4, 0x00000000 }, { 0x41c181c8, 0x00000000 }, { 0x41c181cc, 0x00000000 },
++	{ 0x41c181d0, 0x00000000 }, { 0x41c181d4, 0x00000000 }, { 0x41c181d8, 0x00000000 },
++	{ 0x41c181dc, 0x00000000 }, { 0x41c181e0, 0x00000000 }, { 0x41c181e4, 0x00000000 },
++	{ 0x41c181e8, 0x00000000 }, { 0x41c181ec, 0x00000000 }, { 0x41c181f0, 0x00000000 },
++	{ 0x41c181f4, 0x00000000 }, { 0x41c181f8, 0x00000000 }, { 0x41c181fc, 0x00000000 },
++	{ 0x41c18200, 0x00000000 }, { 0x41c18204, 0x00000000 }, { 0x41c18208, 0x00000000 },
++	{ 0x41c1820c, 0x00000000 }, { 0x41c18210, 0x00000000 }, { 0x41c18214, 0x00000000 },
++	{ 0x41c18218, 0x00000000 }, { 0x41c1821c, 0x00000000 }, { 0x41c18220, 0x00000000 },
++	{ 0x41c18224, 0x00000000 }, { 0x41c18228, 0x00000000 }, { 0x41c1822c, 0x00000000 },
++	{ 0x41c18230, 0x00000000 }, { 0x41c18234, 0x00000000 }, { 0x41c18238, 0x00000000 },
++	{ 0x41c1823c, 0x00000000 }, { 0x41c18240, 0x00000000 }, { 0x41c18244, 0x00000000 },
++	{ 0x41c18248, 0x00000000 }, { 0x41c1824c, 0x00000000 }, { 0x41c18250, 0x00000000 },
++	{ 0x41c18254, 0x00000000 }, { 0x41c18258, 0x00000000 }, { 0x41c1825c, 0x00000000 },
++	{ 0x41c18260, 0x00000000 }, { 0x41c18264, 0x00000000 }, { 0x41c18268, 0x00000000 },
++	{ 0x41c1826c, 0x00000000 }, { 0x41c18270, 0x00000000 }, { 0x41c18274, 0x00000000 },
++	{ 0x41c18278, 0x00000000 }, { 0x41c1827c, 0x00000000 }, { 0x41c18280, 0x00000000 },
++	{ 0x41c18284, 0x00000000 }, { 0x41c18288, 0x00000000 }, { 0x41c1828c, 0x00000000 },
++	{ 0x41c18290, 0x00000000 }, { 0x41c18294, 0x00000000 }, { 0x41c18298, 0x00000000 },
++	{ 0x41c1829c, 0x00000000 }, { 0x41c182a0, 0x00000000 }, { 0x41c182a4, 0x00000000 },
++	{ 0x41c182a8, 0x00000000 }, { 0x41c182ac, 0x00000000 }, { 0x41c182b0, 0x00000000 },
++	{ 0x41c182b4, 0x00000000 }, { 0x41c182b8, 0x00000000 }, { 0x41c182bc, 0x00000000 },
++	{ 0x41c182c0, 0x00000000 }, { 0x41c182c4, 0x00000000 }, { 0x41c182c8, 0x00000000 },
++	{ 0x41c182cc, 0x00000000 }, { 0x41c182d0, 0x00000000 }, { 0x41c182d4, 0x00000000 },
++	{ 0x41c182d8, 0x00000000 }, { 0x41c182dc, 0x00000000 }, { 0x41c182e0, 0x00000000 },
++	{ 0x41c182e4, 0x00000000 }, { 0x41c182e8, 0x00000000 }, { 0x41c182ec, 0x00000000 },
++	{ 0x41c182f0, 0x00000000 }, { 0x41c182f4, 0x00000000 }, { 0x41c182f8, 0x00000000 },
++	{ 0x41c182fc, 0x00000000 }, { 0x41c18300, 0x00000000 }, { 0x41c18304, 0x00000000 },
++	{ 0x41c18308, 0x00000000 }, { 0x41c1830c, 0x00000000 }, { 0x41c18310, 0x00000000 },
++	{ 0x41c18314, 0x00000000 }, { 0x41c18318, 0x00000000 }, { 0x41c1831c, 0x00000000 },
++	{ 0x41c18320, 0x00000000 }, { 0x41c18324, 0x00000000 }, { 0x41c18328, 0x00000000 },
++	{ 0x41c1832c, 0x00000000 }, { 0x41c18330, 0x00000000 }, { 0x41c18334, 0x00000000 },
++	{ 0x41c18338, 0x00000000 }, { 0x41c1833c, 0x00000000 }, { 0x41c18340, 0x00000000 },
++	{ 0x41c18344, 0x00000000 }, { 0x41c18348, 0x00000000 }, { 0x41c1834c, 0x00000000 },
++	{ 0x41c18350, 0x00000000 }, { 0x41c18354, 0x00000000 }, { 0x41c18358, 0x00000000 },
++	{ 0x41c1835c, 0x00000000 }, { 0x41c18360, 0x00000000 }, { 0x41c18364, 0x00000000 },
++	{ 0x41c18368, 0x00000000 }, { 0x41c1836c, 0x00000000 }, { 0x41c18370, 0x00000000 },
++	{ 0x41c18374, 0x00000000 }, { 0x41c18378, 0x00000000 }, { 0x41c1837c, 0x00000000 },
++	{ 0x41c18380, 0x00000000 }, { 0x41c18384, 0x00000000 }, { 0x41c18388, 0x00000000 },
++	{ 0x41c1838c, 0x00000000 }, { 0x41c18390, 0x00000000 }, { 0x41c18394, 0x00000000 },
++	{ 0x41c18398, 0x00000000 }, { 0x41c1839c, 0x00000000 }, { 0x41c183a0, 0x00000000 },
++	{ 0x41c183a4, 0x00000000 }, { 0x41c183a8, 0x00000000 }, { 0x41c183ac, 0x00000000 },
++	{ 0x41c183b0, 0x00000000 }, { 0x41c183b4, 0x00000000 }, { 0x41c183b8, 0x00000000 },
++	{ 0x41c183bc, 0x00000000 }, { 0x41c183c0, 0x00000000 }, { 0x41c183c4, 0x00000000 },
++	{ 0x41c183c8, 0x00000000 }, { 0x41c183cc, 0x00000000 }, { 0x41c183d0, 0x00000000 },
++	{ 0x41c183d4, 0x00000000 }, { 0x41c183d8, 0x00000000 }, { 0x41c183dc, 0x00000000 },
++	{ 0x41c183e0, 0x00000000 }, { 0x41c183e4, 0x00000000 }, { 0x41c183e8, 0x00000000 },
++	{ 0x41c183ec, 0x00000000 }, { 0x41c183f0, 0x00000000 }, { 0x41c183f4, 0x00000000 },
++	{ 0x41c183f8, 0x00000000 }, { 0x41c183fc, 0x00000000 }, { 0x41c18400, 0x00000000 },
++	{ 0x41c18404, 0x00000000 }, { 0x41c18408, 0x00000000 }, { 0x41c1840c, 0x00000000 },
++	{ 0x41c18410, 0x00000000 }, { 0x41c18414, 0x00000000 }, { 0x41c18418, 0x00000000 },
++	{ 0x41c1841c, 0x00000000 }, { 0x41c18420, 0x00000000 }, { 0x41c18424, 0x00000000 },
++	{ 0x41c18428, 0x00000000 }, { 0x41c1842c, 0x00000000 }, { 0x41c18430, 0x00000000 },
++	{ 0x41c18434, 0x00000000 }, { 0x41c18438, 0x00000000 }, { 0x41c1843c, 0x00000000 },
++	{ 0x41c18440, 0x00000000 }, { 0x41c18444, 0x00000000 }, { 0x41c18448, 0x00000000 },
++	{ 0x41c1844c, 0x00000000 }, { 0x41c18450, 0x00000000 }, { 0x41c18454, 0x00000000 },
++	{ 0x41c18458, 0x00000000 }, { 0x41c1845c, 0x00000000 }, { 0x41c18460, 0x00000000 },
++	{ 0x41c18464, 0x00000000 }, { 0x41c18468, 0x00000000 }, { 0x41c1846c, 0x00000000 },
++	{ 0x41c18470, 0x00000000 }, { 0x41c18474, 0x00000000 }, { 0x41c18478, 0x00000000 },
++	{ 0x41c1847c, 0x00000000 }, { 0x41c18480, 0x00000000 }, { 0x41c18484, 0x00000000 },
++	{ 0x41c18488, 0x00000000 }, { 0x41c1848c, 0x00000000 }, { 0x41c18490, 0x00000000 },
++	{ 0x41c18494, 0x00000000 }, { 0x41c18498, 0x00000000 }, { 0x41c1849c, 0x00000000 },
++	{ 0x41c184a0, 0x00000000 }, { 0x41c184a4, 0x00000000 }, { 0x41c184a8, 0x00000000 },
++	{ 0x41c184ac, 0x00000000 }, { 0x41c184b0, 0x00000000 }, { 0x41c184b4, 0x00000000 },
++	{ 0x41c184b8, 0x00000000 }, { 0x41c184bc, 0x00000000 }, { 0x41c184c0, 0x00000000 },
++	{ 0x41c184c4, 0x00000000 }, { 0x41c184c8, 0x00000000 }, { 0x41c184cc, 0x00000000 },
++	{ 0x41c184d0, 0x00000000 }, { 0x41c184d4, 0x00000000 }, { 0x41c184d8, 0x00000000 },
++	{ 0x41c184dc, 0x00000000 }, { 0x41c184e0, 0x00000000 }, { 0x41c184e4, 0x00000000 },
++	{ 0x41c184e8, 0x00000000 }, { 0x41c184ec, 0x00000000 }, { 0x41c184f0, 0x00000000 },
++	{ 0x41c184f4, 0x00000000 }, { 0x41c184f8, 0x00000000 }, { 0x41c184fc, 0x00000000 },
++	{ 0x41c18500, 0x00000000 }, { 0x41c18504, 0x00000000 }, { 0x41c18508, 0x00000000 },
++	{ 0x41c1850c, 0x00000000 }, { 0x41c18510, 0x00000000 }, { 0x41c18514, 0x00000000 },
++	{ 0x41c18518, 0x00000000 }, { 0x41c1851c, 0x00000000 }, { 0x41c18520, 0x00000000 },
++	{ 0x41c18524, 0x00000000 }, { 0x41c18528, 0x00000000 }, { 0x41c1852c, 0x00000000 },
++	{ 0x41c18530, 0x00000000 }, { 0x41c18534, 0x00000000 }, { 0x41c18538, 0x00000000 },
++	{ 0x41c1853c, 0x00000000 }, { 0x41c18540, 0x00000000 }, { 0x41c18544, 0x00000000 },
++	{ 0x41c18548, 0x00000000 }, { 0x41c1854c, 0x00000000 }, { 0x41c18550, 0x00000000 },
++	{ 0x41c18554, 0x00000000 }, { 0x41c18558, 0x00000000 }, { 0x41c1855c, 0x00000000 },
++	{ 0x41c18560, 0x00000000 }, { 0x41c18564, 0x00000000 }, { 0x41c18568, 0x00000000 },
++	{ 0x41c1856c, 0x00000000 }, { 0x41c18570, 0x00000000 }, { 0x41c18574, 0x00000000 },
++	{ 0x41c18578, 0x00000000 }, { 0x41c1857c, 0x00000000 }, { 0x41c18580, 0x00000000 },
++	{ 0x41c18584, 0x00000000 }, { 0x41c18588, 0x00000000 }, { 0x41c1858c, 0x00000000 },
++	{ 0x41c18590, 0x00000000 }, { 0x41c18594, 0x00000000 }, { 0x41c18598, 0x00000000 },
++	{ 0x41c1859c, 0x00000000 }, { 0x41c185a0, 0x00000000 }, { 0x41c185a4, 0x00000000 },
++	{ 0x41c185a8, 0x00000000 }, { 0x41c185ac, 0x00000000 }, { 0x41c185b0, 0x00000000 },
++	{ 0x41c185b4, 0x00000000 }, { 0x41c185b8, 0x00000000 }, { 0x41c185bc, 0x00000000 },
++	{ 0x41c185c0, 0x00000000 }, { 0x41c185c4, 0x00000000 }, { 0x41c185c8, 0x00000000 },
++	{ 0x41c185cc, 0x00000000 }, { 0x41c185d0, 0x00000000 }, { 0x41c185d4, 0x00000000 },
++	{ 0x41c185d8, 0x00000000 }, { 0x41c185dc, 0x00000000 }, { 0x41c185e0, 0x00000000 },
++	{ 0x41c185e4, 0x00000000 }, { 0x41c185e8, 0x00000000 }, { 0x41c185ec, 0x00000000 },
++	{ 0x41c185f0, 0x00000000 }, { 0x41c185f4, 0x00000000 }, { 0x41c185f8, 0x00000000 },
++	{ 0x41c185fc, 0x00000000 }, { 0x40d00000, 0x0102bb00 }, { 0x40d01000, 0x0102bb00 },
++	{ 0x40d02000, 0x0102bb00 }, { 0x40d08500, 0x00000420 }, { 0x40d08840, 0x00000008 },
++	{ 0x40d08844, 0x00000008 }, { 0x40d08848, 0x00000008 }, { 0x40d0884c, 0x00000008 },
++	{ 0x40d94020, 0x00000707 }, { 0x40d94000, 0x00000015 }, { 0x40d94000, 0x00301215 },
++	{ 0x40d94024, 0x40404040 }, { 0x40d94028, 0x060005ee }, { 0x40d94024, 0x40404040 },
++	{ 0x40d94028, 0x05ee05ee }, { 0x40d94024, 0x40404040 }, { 0x40d9402c, 0x060005ee },
++	{ 0x40d94024, 0x40404040 }, { 0x40d9402c, 0x05ee05ee }, { 0x40d94030, 0x00000012 },
++	{ 0x40d94044, 0x000000ff }, { 0x40d94034, 0x00001000 }, { 0x40d94034, 0x00000000 },
++	{ 0x40d94064, 0x0000000f }, { 0x40d94420, 0x00000707 }, { 0x40d9441c, 0x00000707 },
++	{ 0x40d94400, 0x00000015 }, { 0x40d94400, 0x00301215 }, { 0x40d94404, 0x00000101 },
++	{ 0x40d94424, 0x40404040 }, { 0x40d94428, 0x060005ee }, { 0x40d94424, 0x40404040 },
++	{ 0x40d94428, 0x05ee05ee }, { 0x40d94424, 0x40404040 }, { 0x40d9442c, 0x060005ee },
++	{ 0x40d94424, 0x40404040 }, { 0x40d9442c, 0x05ee05ee }, { 0x40d94430, 0x00000012 },
++	{ 0x40d94444, 0x000000ff }, { 0x40d94434, 0x00001000 }, { 0x40d94434, 0x00000000 },
++	{ 0x40d94464, 0x0000000f }, { 0x40d94820, 0x00000707 }, { 0x40d9481c, 0x00000e0e },
++	{ 0x40d94800, 0x00000015 }, { 0x40d94800, 0x00301215 }, { 0x40d94804, 0x00000202 },
++	{ 0x40d94824, 0x40404040 }, { 0x40d94828, 0x060005ee }, { 0x40d94824, 0x40404040 },
++	{ 0x40d94828, 0x05ee05ee }, { 0x40d94824, 0x40404040 }, { 0x40d9482c, 0x060005ee },
++	{ 0x40d94824, 0x40404040 }, { 0x40d9482c, 0x05ee05ee }, { 0x40d94830, 0x00000012 },
++	{ 0x40d94844, 0x000000ff }, { 0x40d94834, 0x00001000 }, { 0x40d94834, 0x00000000 },
++	{ 0x40d94864, 0x0000000f }, { 0x40d94c20, 0x00000707 }, { 0x40d94c1c, 0x00001515 },
++	{ 0x40d94c00, 0x00000015 }, { 0x40d94c00, 0x00301215 }, { 0x40d94c04, 0x00000303 },
++	{ 0x40d94c24, 0x40404040 }, { 0x40d94c28, 0x060005ee }, { 0x40d94c24, 0x40404040 },
++	{ 0x40d94c28, 0x05ee05ee }, { 0x40d94c24, 0x40404040 }, { 0x40d94c2c, 0x060005ee },
++	{ 0x40d94c24, 0x40404040 }, { 0x40d94c2c, 0x05ee05ee }, { 0x40d94c30, 0x00000012 },
++	{ 0x40d94c44, 0x000000ff }, { 0x40d94c34, 0x00001000 }, { 0x40d94c34, 0x00000000 },
++	{ 0x40d94c64, 0x0000000f }, { 0x40d95020, 0x00000707 }, { 0x40d9501c, 0x00001c1c },
++	{ 0x40d95000, 0x00000015 }, { 0x40d95000, 0x00301215 }, { 0x40d95004, 0x00000404 },
++	{ 0x40d95024, 0x40404040 }, { 0x40d95028, 0x060005ee }, { 0x40d95024, 0x40404040 },
++	{ 0x40d95028, 0x05ee05ee }, { 0x40d95024, 0x40404040 }, { 0x40d9502c, 0x060005ee },
++	{ 0x40d95024, 0x40404040 }, { 0x40d9502c, 0x05ee05ee }, { 0x40d95030, 0x00000012 },
++	{ 0x40d95044, 0x000000ff }, { 0x40d95034, 0x00001000 }, { 0x40d95034, 0x00000000 },
++	{ 0x40d95064, 0x0000000f }, { 0x40d90000, 0x00000001 }, { 0x40d90004, 0x17300000 },
++	{ 0x40d90004, 0x17300013 }, { 0x40d90020, 0x00080380 }, { 0x40d90004, 0x17301513 },
++	{ 0x40d90024, 0x00080380 }, { 0x40d9000c, 0x20200000 }, { 0x40d90018, 0x00010030 },
++	{ 0x40d90400, 0x00080000 }, { 0x40d90450, 0x00070007 }, { 0x40d90500, 0x00000000 },
++	{ 0x40d90550, 0x00000000 }, { 0x40d90908, 0x01000000 }, { 0x40d90920, 0x01400000 },
++	{ 0x40d90940, 0x013f013f }, { 0x40d90960, 0x00280000 }, { 0x40d90980, 0x00270027 },
++	{ 0x40d90700, 0x00080000 }, { 0x40d90750, 0x00070007 }, { 0x40d90800, 0x00000000 },
++	{ 0x40d90850, 0x0fff0fff }, { 0x40d90908, 0x01000001 }, { 0x40d90924, 0x03c00280 },
++	{ 0x40d90944, 0x013f013f }, { 0x40d90964, 0x00780050 }, { 0x40d90984, 0x00270027 },
++	{ 0x40d90704, 0x00180010 }, { 0x40d90754, 0x00070007 }, { 0x40d90804, 0x00000000 },
++	{ 0x40d90854, 0x0fff0fff }, { 0x40d90908, 0x01000002 }, { 0x40d90928, 0x06400500 },
++	{ 0x40d90948, 0x013f013f }, { 0x40d90968, 0x00c800a0 }, { 0x40d90988, 0x00270027 },
++	{ 0x40d90708, 0x00280020 }, { 0x40d90758, 0x00070007 }, { 0x40d90808, 0x00000000 },
++	{ 0x40d90858, 0x0fff0fff }, { 0x40d90908, 0x01000003 }, { 0x40d9092c, 0x00000000 },
++	{ 0x40d9094c, 0x013f013f }, { 0x40d9096c, 0x00000000 }, { 0x40d9098c, 0x00270027 },
++	{ 0x40d9070c, 0x00380030 }, { 0x40d9075c, 0x00070007 }, { 0x40d9080c, 0x00000000 },
++	{ 0x40d9085c, 0x0fff0fff }, { 0x40d90600, 0x00000000 }, { 0x40d90604, 0x00000001 },
++	{ 0x40d9090c, 0x0000003f }, { 0x40d90020, 0x000c0380 }, { 0x40d90024, 0x000c0380 },
++	{ 0x40d9003c, 0x12047c5e }, { 0x40d98000, 0x017fc000 }, { 0x40d988d4, 0x00000010 },
++	{ 0x40d98824, 0x0000000e }, { 0x40d98844, 0x00000203 }, { 0x40d98864, 0x00000084 },
++	{ 0x40d98884, 0x0000201f }, { 0x40d98828, 0x0000000e }, { 0x40d98848, 0x00000203 },
++	{ 0x40d98868, 0x00000084 }, { 0x40d98888, 0x00002e21 }, { 0x40d9884c, 0x00000203 },
++	{ 0x40d9886c, 0x00000084 }, { 0x40d9888c, 0x00002023 }, { 0x40d98850, 0x00000203 },
++	{ 0x40d98870, 0x00000084 }, { 0x40d98890, 0x00002025 }, { 0x40d98854, 0x00000203 },
++	{ 0x40d98874, 0x00000084 }, { 0x40d98894, 0x00002027 }, { 0x40d98858, 0x00000608 },
++	{ 0x40d98878, 0x00000084 }, { 0x40d98898, 0x0000202d }, { 0x40d98cd4, 0x00000008 },
++	{ 0x40d98c04, 0x00000007 }, { 0x40d98c24, 0x0000000e }, { 0x40d98c44, 0x00000203 },
++	{ 0x40d98c64, 0x00000084 }, { 0x40d98c84, 0x0000201f }, { 0x40d98c08, 0x00000007 },
++	{ 0x40d98c28, 0x0000000e }, { 0x40d98c48, 0x00000203 }, { 0x40d98c68, 0x00000084 },
++	{ 0x40d98c88, 0x00002e21 }, { 0x40d98c0c, 0x00000007 }, { 0x40d98c4c, 0x00000203 },
++	{ 0x40d98c6c, 0x00000084 }, { 0x40d98c8c, 0x00002023 }, { 0x40d98c10, 0x00000007 },
++	{ 0x40d98c50, 0x00000203 }, { 0x40d98c70, 0x00000084 }, { 0x40d98c90, 0x00002025 },
++	{ 0x40d98c14, 0x00000007 }, { 0x40d98c54, 0x00000203 }, { 0x40d98c74, 0x00000084 },
++	{ 0x40d98c94, 0x00002027 }, { 0x40d98c18, 0x0000000d }, { 0x40d98c58, 0x00000608 },
++	{ 0x40d98c78, 0x00000084 }, { 0x40d98c98, 0x0000202d }, { 0x03000000, 0x00000020 },
++	{ 0x82d80080, 0xfff00f3f }, { 0x03000000, 0x00000020 }, { 0x82d80100, 0xfff00f3f },
++	{ 0x40d80180, 0x7f1ff1ff }, { 0x40d80184, 0x0a0c80bc }, { 0x07000000, 0x000001ff },
++	{ 0x82d83000, 0x00040004 }, { 0x40d8270c, 0x000001ff }, { 0x40d82714, 0x00000200 },
++	{ 0x40d82708, 0x00000200 }, { 0x40d80080, 0x7f1ff1ff }, { 0x40d80100, 0x7f1ff1ff },
++	{ 0x40d80400, 0x0002001f }, { 0x40d80620, 0x00000001 }, { 0x40d80300, 0x00004191 },
++	{ 0x40d80380, 0x00000400 }, { 0x40d82700, 0x00000001 }, { 0x40d8270c, 0x000001ff },
++	{ 0x40d82714, 0x00000200 }, { 0x40d82708, 0x00000200 }, { 0x40d82704, 0x00000001 },
++	{ 0x40d80990, 0x0000001f }, { 0x40d80084, 0x7f1ff1ff }, { 0x40d80104, 0x7f1ff1ff },
++	{ 0x40d80404, 0x00020021 }, { 0x40d80620, 0x00000003 }, { 0x40d80304, 0x00004191 },
++	{ 0x40d80384, 0x00000400 }, { 0x40d82020, 0x00000001 }, { 0x40d8202c, 0x00000001 },
++	{ 0x40d82700, 0x00000002 }, { 0x40d8270c, 0x000001ff }, { 0x40d82714, 0x00000200 },
++	{ 0x40d82708, 0x00000200 }, { 0x40d82704, 0x00000002 }, { 0x40d80990, 0x0000001f },
++	{ 0x40d80088, 0x7f1ff1ff }, { 0x40d80108, 0x7f1ff1ff }, { 0x40d80408, 0x00020023 },
++	{ 0x40d80620, 0x00000007 }, { 0x40d80308, 0x00004191 }, { 0x40d80388, 0x00000400 },
++	{ 0x40d82040, 0x00000002 }, { 0x40d8204c, 0x00000002 }, { 0x40d82700, 0x00000003 },
++	{ 0x40d8270c, 0x000001ff }, { 0x40d82714, 0x00000200 }, { 0x40d82708, 0x00000200 },
++	{ 0x40d82704, 0x00000003 }, { 0x40d80990, 0x0000001f }, { 0x40d8008c, 0x7f1ff1ff },
++	{ 0x40d8010c, 0x7f1ff1ff }, { 0x40d8040c, 0x00020025 }, { 0x40d80620, 0x0000000f },
++	{ 0x40d8030c, 0x00004191 }, { 0x40d8038c, 0x00000400 }, { 0x40d82060, 0x00000003 },
++	{ 0x40d8206c, 0x00000003 }, { 0x40d82700, 0x00000004 }, { 0x40d8270c, 0x000001ff },
++	{ 0x40d82714, 0x00000200 }, { 0x40d82708, 0x00000200 }, { 0x40d82704, 0x00000004 },
++	{ 0x40d80990, 0x0000001f }, { 0x40d80090, 0x7f1ff1ff }, { 0x40d80110, 0x7f1ff1ff },
++	{ 0x40d80410, 0x00020027 }, { 0x40d80620, 0x0000001f }, { 0x40d80310, 0x00004191 },
++	{ 0x40d80390, 0x00000400 }, { 0x40d82080, 0x00000004 }, { 0x40d8208c, 0x00000004 },
++	{ 0x40d82700, 0x00000005 }, { 0x40d8270c, 0x000001ff }, { 0x40d82714, 0x00000200 },
++	{ 0x40d82708, 0x00000200 }, { 0x40d82704, 0x00000005 }, { 0x40d80990, 0x0000001f },
++	{ 0x40d80094, 0x7f1ff1ff }, { 0x40d80114, 0x7f1ff1ff }, { 0x40d80414, 0x0002002d },
++	{ 0x40d80620, 0x0000003f }, { 0x40d80314, 0x00004191 }, { 0x40d80394, 0x00000400 },
++	{ 0x40d820a0, 0x00000005 }, { 0x40d820ac, 0x00000005 }, { 0x40d82700, 0x00000006 },
++	{ 0x40d8270c, 0x000001ff }, { 0x40d82714, 0x00000200 }, { 0x40d82708, 0x00000200 },
++	{ 0x40d82704, 0x00000006 }, { 0x40d80990, 0x0000001f }, { 0x40d80098, 0x7f1ff1ff },
++	{ 0x40d80118, 0x7f1ff1ff }, { 0x40d80418, 0x0003001f }, { 0x40d80620, 0x0000007f },
++	{ 0x40d80318, 0x00000191 }, { 0x40d80398, 0x00000400 }, { 0x40d820c0, 0x00000006 },
++	{ 0x40d820cc, 0x00000006 }, { 0x40d82700, 0x00000007 }, { 0x40d8270c, 0x000001ff },
++	{ 0x40d82714, 0x00000200 }, { 0x40d82708, 0x00000200 }, { 0x40d82704, 0x00000007 },
++	{ 0x40d80990, 0x0000001f }, { 0x40d8009c, 0x7f1ff1ff }, { 0x40d8011c, 0x7f1ff1ff },
++	{ 0x40d8041c, 0x00030021 }, { 0x40d80620, 0x000000ff }, { 0x40d8031c, 0x00000191 },
++	{ 0x40d8039c, 0x00000400 }, { 0x40d820e0, 0x00000007 }, { 0x40d820ec, 0x00000007 },
++	{ 0x40d82700, 0x00000008 }, { 0x40d8270c, 0x000001ff }, { 0x40d82714, 0x00000200 },
++	{ 0x40d82708, 0x00000200 }, { 0x40d82704, 0x00000008 }, { 0x40d80990, 0x0000001f },
++	{ 0x40d800a0, 0x7f1ff1ff }, { 0x40d80120, 0x7f1ff1ff }, { 0x40d80420, 0x00030023 },
++	{ 0x40d80620, 0x000001ff }, { 0x40d80320, 0x00000191 }, { 0x40d803a0, 0x00000400 },
++	{ 0x40d82100, 0x00000008 }, { 0x40d8210c, 0x00000008 }, { 0x40d82700, 0x00000009 },
++	{ 0x40d8270c, 0x000001ff }, { 0x40d82714, 0x00000200 }, { 0x40d82708, 0x00000200 },
++	{ 0x40d82704, 0x00000009 }, { 0x40d80990, 0x0000001f }, { 0x40d800a4, 0x7f1ff1ff },
++	{ 0x40d80124, 0x7f1ff1ff }, { 0x40d80424, 0x00030025 }, { 0x40d80620, 0x000003ff },
++	{ 0x40d80324, 0x00000191 }, { 0x40d803a4, 0x00000400 }, { 0x40d82120, 0x00000009 },
++	{ 0x40d8212c, 0x00000009 }, { 0x40d82700, 0x0000000a }, { 0x40d8270c, 0x000001ff },
++	{ 0x40d82714, 0x00000200 }, { 0x40d82708, 0x00000200 }, { 0x40d82704, 0x0000000a },
++	{ 0x40d80990, 0x0000001f }, { 0x40d800a8, 0x7f1ff1ff }, { 0x40d80128, 0x7f1ff1ff },
++	{ 0x40d80428, 0x00030027 }, { 0x40d80620, 0x000007ff }, { 0x40d80328, 0x00000191 },
++	{ 0x40d803a8, 0x00000400 }, { 0x40d82140, 0x0000000a }, { 0x40d8214c, 0x0000000a },
++	{ 0x40d82700, 0x0000000b }, { 0x40d8270c, 0x000001ff }, { 0x40d82714, 0x00000200 },
++	{ 0x40d82708, 0x00000200 }, { 0x40d82704, 0x0000000b }, { 0x40d80990, 0x0000001f },
++	{ 0x40d800ac, 0x7f1ff1ff }, { 0x40d8012c, 0x7f1ff1ff }, { 0x40d8042c, 0x0003002d },
++	{ 0x40d80620, 0x00000fff }, { 0x40d8032c, 0x00001191 }, { 0x40d803ac, 0x00000400 },
++	{ 0x40d82160, 0x0000000b }, { 0x40d8216c, 0x0000000b }, { 0x40d82700, 0x0000000c },
++	{ 0x40d8270c, 0x000001ff }, { 0x40d82714, 0x00000200 }, { 0x40d82708, 0x00000200 },
++	{ 0x40d82704, 0x0000000c }, { 0x40d80990, 0x0000001f }, { 0x40d800b0, 0x7f1ff1ff },
++	{ 0x40d80130, 0x7f1ff1ff }, { 0x40d80430, 0x101a0000 }, { 0x40d804c0, 0x00001000 },
++	{ 0x40d80620, 0x00001fff }, { 0x40d80330, 0x00004191 }, { 0x40d82180, 0x0000000c },
++	{ 0x40d8218c, 0x0000000c }, { 0x40d82700, 0x0000000d }, { 0x40d8270c, 0x000001ff },
++	{ 0x40d82714, 0x00000200 }, { 0x40d82708, 0x00000200 }, { 0x40d82704, 0x0000000d },
++	{ 0x40d80990, 0x0000001f }, { 0x40d80520, 0x00000001 }, { 0x40d80604, 0x0000003f },
++	{ 0x40d80900, 0x00000001 }, { 0x40d80480, 0x00000028 }, { 0x40d804d0, 0x0000017f },
++	{ 0x40d804d8, 0x00000081 }, { 0x40d804d4, 0x0000017f }, { 0x40d804dc, 0x00000081 },
++	{ 0x40d80980, 0x00000100 }, { 0x40d80004, 0x000017df }, { 0x40d9403c, 0x00000003 },
++	{ 0x40d9443c, 0x00000003 }, { 0x40d9483c, 0x00000003 }, { 0x40d94c3c, 0x00000003 },
++	{ 0x40d9503c, 0x00000003 }, { 0x40d80000, 0x00000101 }, { 0x40100000, 0x00000307 },
++	{ 0x40d96000, 0x00000001 }, { 0x40d00000, 0x0102bb01 }, { 0x11c0063e, 0x00000000 },
++	{ 0x11c00642, 0x00000008 }, { 0x11c00646, 0x00000010 }, { 0x11c0064a, 0x00000018 },
++	{ 0x11c0064e, 0x00000020 },
++};
+diff --git a/drivers/net/ethernet/broadcom/bcmbca_xrdp.c b/drivers/net/ethernet/broadcom/bcmbca_xrdp.c
+new file mode 100644
+index 000000000000..bee60f56eef3
+--- /dev/null
++++ b/drivers/net/ethernet/broadcom/bcmbca_xrdp.c
+@@ -0,0 +1,1068 @@
++// SPDX-License-Identifier: GPL-2.0-or-later
++/*
++ * BCMBCA reduced XRDP Ethernet driver.
++ *
++ * Based on Broadcom's GPL U-Boot bcmbca/xrdp driver (2019-2020).
++ * The reduced Runner program exchanges packets through on-chip SRAM.
++ * SoC match data supplies the register layout, port routing and program.
++ * The SRAM Buffer Pool Manager (SBPM) allocates and frees 128-byte buffers,
++ * which are linked together to hold larger packets. The driver does not
++ * use host DMA rings or the vendor RDPA ABI. Packet descriptors use the
++ * vendor GEN45 SBPM format.
++ * Firmware must have configured pin multiplexing and external PHYs.
++ */
++
++#include <linux/bitmap.h>
++#include <linux/clk.h>
++#include <linux/delay.h>
++#include <linux/etherdevice.h>
++#include <linux/ethtool.h>
++#include <linux/io.h>
++#include <linux/iopoll.h>
++#include <linux/module.h>
++#include <linux/mutex.h>
++#include <linux/of.h>
++#include <linux/of_mdio.h>
++#include <linux/of_net.h>
++#include <linux/phylink.h>
++#include <linux/platform_device.h>
++#include <linux/property.h>
++#include <linux/reset.h>
++#include <linux/rtnetlink.h>
++#include <linux/workqueue.h>
++
++#include "bcmbca_xrdp.h"
++#include "unimac.h"
++
++#define RUNNER_ENABLE		BIT(0)
++#define RUNNER_WAKEUP		0x4
++#define CPU_TX_THREAD		1
++#define TX_QUEUE_LEN		64
++#define BBH_RX_MAXPKT0		0x28
++#define BBH_RX_MAXPKT1		0x2c
++#define BBH_RX_ENABLE		0x3c
++#define SBPM_ALLOC		0x04
++#define SBPM_ALLOC_REPLY		0x08
++#define SBPM_CONNECT		0x1c
++#define SBPM_CONNECT_REPLY	0x20
++#define SBPM_NEXT		0x24
++#define SBPM_NEXT_REPLY		0x28
++#define SBPM_FREE		0x38
++#define SBPM_FREE_REPLY		0x3c
++#define SBPM_UG0_COUNT		0x78
++#define SBPM_UG1_COUNT		0x7c
++#define SBPM_GLOBAL_COUNT		0x98
++#define SBPM_ISR			0x200
++#define SBPM_READY		BIT(31)
++#define SBPM_BUSY		BIT(30)
++#define SBPM_ACK		BIT(0)
++#define SBPM_NULL		BIT(15)
++#define SBPM_BUFFER		GENMASK(14, 1)
++
++/* BCM6846 QEGPHY control, relative to the XRDP resource. */
++#define BCM6846_QEGPHY_CTRL		0xdb2208
++#define BCM6846_QEGPHY_IDDQ_BIAS		BIT(0)
++#define BCM6846_QEGPHY_EXT_PWR_DOWN	GENMASK(4, 1)
++#define BCM6846_QEGPHY_IDDQ_GLOBAL	BIT(6)
++#define BCM6846_QEGPHY_RESET		BIT(8)
++#define BCM6846_QEGPHY_PLL_250		BIT(21)
++
++#include "bcm6846_enet_data.h"
++
++/* UniMAC/BBH registers, RGMII attachment and Runner TX routing per port. */
++static const struct bcmbca_xrdp_port_data bcm6846_ports[] = {
++	{
++		.mac = 0xda0000, .mib = 0xda8000, .mac_top = 0xdaa000,
++		.bbh_rx = 0xd94000, .tx_destination = 32, .tx_counter = 0x180,
++	}, {
++		.mac = 0xda1000, .mib = 0xda8400, .mac_top = 0xdaa400,
++		.bbh_rx = 0xd94400, .tx_destination = 96, .tx_counter = 0x181,
++	}, {
++		.mac = 0xda2000, .mib = 0xda8800, .mac_top = 0xdaa800,
++		.bbh_rx = 0xd94800, .tx_destination = 160, .tx_counter = 0x182,
++	}, {
++		.mac = 0xda3000, .mib = 0xda8c00, .mac_top = 0xdaac00,
++		.bbh_rx = 0xd94c00, .tx_destination = 224, .tx_counter = 0x183,
++	}, {
++		.mac = 0xda4000, .mib = 0xda9000, .mac_top = 0xdab000,
++		.bbh_rx = 0xd95000, .rgmii = 0xd97300,
++		.tx_destination = 288, .tx_counter = 0x184,
++	},
++};
++
++static const struct bcmbca_xrdp_enet_variant bcm6846_variant = {
++	.init_data = bcm6846_init_data,
++	.init_data_size = ARRAY_SIZE(bcm6846_init_data),
++	.init_base = 0x82000000,
++	.reg_size = 0x1000000,
++	.sbpm = 0xd98000,
++	.psram = 0x600000,
++	.runner_ctrl = 0xd00000,
++	.runner_stride = 0x1000,
++	.runner_sram = 0xc00000,
++	.rx_fifo = 0x800,
++	.tx_descriptor = 0x50,
++	.tx_destination = 0xdc,
++	.rx_fifo_size = 64,
++	.num_runners = 3,
++	.num_buffers = 1536,
++	.num_ports = ARRAY_SIZE(bcm6846_ports),
++	.sbpm_alloc_sa = 30,
++	.sbpm_free_sa = 18,
++	.ports = bcm6846_ports,
++};
++
++struct bcmbca_xrdp_enet;
++
++struct bcmbca_xrdp_port {
++	struct bcmbca_xrdp_enet *enet;
++	const struct bcmbca_xrdp_port_data *data;
++	struct net_device *ndev;
++	struct phylink *phylink;
++	struct phylink_config phylink_config;
++	struct sk_buff_head tx_queue;
++	void __iomem *mac;
++	u8 tx_producer;
++	bool running;
++};
++
++struct bcmbca_xrdp_enet {
++	struct device *dev;
++	void __iomem *base;
++	struct reset_control *reset;
++	struct clk_bulk_data *clks;
++	int num_clks;
++	const struct bcmbca_xrdp_enet_variant *variant;
++	unsigned long *rx_seen;
++	struct delayed_work work;
++	/* Serialize all CPU accesses to SBPM's shared command registers. */
++	struct mutex lock;
++	unsigned int rx_index;
++	bool hw_accessible;
++	bool faulted;
++	bool stopping;
++	struct bcmbca_xrdp_port *ports[];
++};
++
++static void bcmbca_xrdp_quiesce(struct bcmbca_xrdp_enet *enet)
++{
++	const struct bcmbca_xrdp_enet_variant *variant = enet->variant;
++	unsigned int i;
++	u32 val;
++
++	/* Cold CFE handoff can leave the Runner register banks powered off. */
++	if (!enet->hw_accessible)
++		return;
++
++	for (i = 0; i < variant->num_ports; i++) {
++		void __iomem *mac = enet->base + variant->ports[i].mac;
++
++		val = readl(mac + UMAC_CMD);
++		writel(val & ~(CMD_RX_EN | CMD_TX_EN), mac + UMAC_CMD);
++		writel(0, enet->base + variant->ports[i].bbh_rx + BBH_RX_ENABLE);
++	}
++	for (i = 0; i < variant->num_runners; i++) {
++		void __iomem *ctrl = enet->base + variant->runner_ctrl +
++				     i * variant->runner_stride;
++
++		val = readl(ctrl);
++		writel(val & ~RUNNER_ENABLE, ctrl);
++		readl(ctrl);
++	}
++	usleep_range(1000, 2000);
++}
++
++static void bcmbca_xrdp_hw_stop(struct bcmbca_xrdp_enet *enet)
++{
++	if (!enet->hw_accessible)
++		return;
++
++	bcmbca_xrdp_quiesce(enet);
++	clk_bulk_disable_unprepare(enet->num_clks, enet->clks);
++	enet->hw_accessible = false;
++}
++
++static bool bcmbca_xrdp_range_valid(const struct bcmbca_xrdp_enet_variant *variant,
++				    u32 offset, u32 size)
++{
++	return offset < variant->reg_size && size <= variant->reg_size - offset;
++}
++
++static int bcmbca_xrdp_hw_init(struct bcmbca_xrdp_enet *enet)
++{
++	const struct bcmbca_xrdp_enet_variant *variant = enet->variant;
++	unsigned int i, j;
++	u32 status;
++	int ret;
++
++	bcmbca_xrdp_hw_stop(enet);
++
++	/* The reset provider powers the zones before their clocks can be prepared. */
++	ret = reset_control_reset(enet->reset);
++	if (ret)
++		return dev_err_probe(enet->dev, ret, "XRDP reset failed\n");
++	ret = clk_bulk_prepare_enable(enet->num_clks, enet->clks);
++	if (ret)
++		return dev_err_probe(enet->dev, ret, "cannot enable XRDP clocks\n");
++	/* All register banks are accessible only after reset and clock setup. */
++	enet->hw_accessible = true;
++
++	if (readl(enet->base + variant->sbpm + SBPM_GLOBAL_COUNT) ||
++	    readl(enet->base + variant->sbpm + SBPM_UG0_COUNT) ||
++	    readl(enet->base + variant->sbpm + SBPM_UG1_COUNT) ||
++	    readl(enet->base + variant->sbpm + SBPM_ISR))
++		return dev_err_probe(enet->dev, -EIO, "SBPM is not empty after reset\n");
++	for (i = 0; i < variant->init_data_size; i++) {
++		const struct bcmbca_xrdp_init_entry *entry = &variant->init_data[i];
++		u32 offset = entry->command & 0xffffff;
++		u32 op = (entry->command >> 24) & 0xf;
++		u32 size = entry->command >> 28;
++		u32 value = entry->value;
++		u32 count;
++
++		switch (op) {
++		case 0: /* Recorded register write, already in CPU byte order. */
++		case 1: /* Recorded Runner SRAM write, already byte-swapped. */
++			if (!bcmbca_xrdp_range_valid(variant, offset, size) ||
++			    (size != 1 && size != 2 && size != 4) ||
++			    !IS_ALIGNED(offset, size))
++				return -EINVAL;
++			if (size == 4)
++				writel(value, enet->base + offset);
++			else if (size == 2)
++				writew(value, enet->base + offset);
++			else
++				writeb(value, enet->base + offset);
++			if (offset == variant->sbpm) {
++				ret = readl_poll_timeout(enet->base + variant->sbpm, status,
++							 status & SBPM_READY, 1, 1000);
++				if (ret) {
++					dev_err(enet->dev, "SBPM initialization timeout: %08x\n",
++						status);
++					return ret;
++				}
++			}
++			break;
++		case 2: /* Byte fill. */
++		case 3: /* Big-endian word fill. */
++		case 7: /* Incrementing native-endian word fill. */
++			count = value;
++			if (++i == variant->init_data_size)
++				return -EINVAL;
++			entry = &variant->init_data[i];
++			offset = entry->command - variant->init_base;
++			value = entry->value;
++			if (count > variant->reg_size / 4 ||
++			    !bcmbca_xrdp_range_valid(variant, offset,
++						op == 2 ? count : count * 4) ||
++			    (op != 2 && !IS_ALIGNED(offset, 4)))
++				return -EINVAL;
++			if (op == 2) {
++				memset_io(enet->base + offset, value, count);
++				break;
++			}
++			for (j = 0; j < count; j++) {
++				if (op == 3)
++					iowrite32be(value, enet->base + offset + j * 4);
++				else
++					writel((value & 0xffff) + j * (value >> 16),
++					       enet->base + offset + j * 4);
++			}
++			break;
++		case 5: /* The reduced image has exactly one Runner SRAM area. */
++			if (offset != variant->runner_sram || value)
++				return -EINVAL;
++			break;
++		default:
++			return -EINVAL;
++		}
++	}
++
++	/* Flush the last write before exposing the packet interface. */
++	readl(enet->base + variant->runner_ctrl);
++
++	return 0;
++}
++
++static int bcmbca_xrdp_sbpm_wait(struct bcmbca_xrdp_enet *enet, u32 reg, u32 *value)
++{
++	const struct bcmbca_xrdp_enet_variant *variant = enet->variant;
++	int ret;
++
++	ret = readl_poll_timeout(enet->base + variant->sbpm + reg, *value,
++				 *value & SBPM_READY, 1, 1000);
++	if (ret) {
++		/* A timed-out command may still complete: do not submit another. */
++		enet->faulted = true;
++		dev_err(enet->dev, "SBPM timeout at %#x: %#x\n", reg, *value);
++	}
++	return ret;
++}
++
++static int bcmbca_xrdp_free(struct bcmbca_xrdp_enet *enet, u16 head)
++{
++	const struct bcmbca_xrdp_enet_variant *variant = enet->variant;
++	u32 value;
++	int ret;
++
++	if (enet->faulted)
++		return -EIO;
++	writel(head | (variant->sbpm_free_sa << 14) | BIT(31),
++	       enet->base + variant->sbpm + SBPM_FREE);
++	ret = bcmbca_xrdp_sbpm_wait(enet, SBPM_FREE_REPLY, &value);
++	if (ret)
++		return ret;
++	if (!(value & SBPM_ACK)) {
++		enet->faulted = true;
++		dev_err(enet->dev, "SBPM free rejected head=%u reply=%08x\n",
++			head, value);
++		return -EIO;
++	}
++	return 0;
++}
++
++static int bcmbca_xrdp_alloc(struct bcmbca_xrdp_enet *enet, u16 *buffer)
++{
++	const struct bcmbca_xrdp_enet_variant *variant = enet->variant;
++	u32 value;
++	int ret;
++
++	writel(variant->sbpm_alloc_sa << 14, enet->base + variant->sbpm + SBPM_ALLOC);
++	ret = bcmbca_xrdp_sbpm_wait(enet, SBPM_ALLOC_REPLY, &value);
++	if (ret)
++		return ret;
++	if (!(value & SBPM_ACK))
++		return -ENOSPC;
++	*buffer = FIELD_GET(SBPM_BUFFER, value);
++	if (*buffer >= variant->num_buffers) {
++		enet->faulted = true;
++		dev_err(enet->dev, "SBPM allocation returned invalid buffer=%u reply=%08x\n",
++			*buffer, value);
++		return -EIO;
++	}
++	return 0;
++}
++
++static int bcmbca_xrdp_connect(struct bcmbca_xrdp_enet *enet, u16 from, u16 to)
++{
++	const struct bcmbca_xrdp_enet_variant *variant = enet->variant;
++	u32 value;
++	int ret;
++
++	writel(from | BIT(14) | (to << 16), enet->base + variant->sbpm + SBPM_CONNECT);
++	ret = bcmbca_xrdp_sbpm_wait(enet, SBPM_CONNECT_REPLY, &value);
++	if (ret)
++		return ret;
++	if (!(value & SBPM_ACK))
++		return -EIO;
++	return 0;
++}
++
++static int bcmbca_xrdp_copy_rx(struct bcmbca_xrdp_enet *enet,
++			       const struct bcmbca_xrdp_rx_info *info, u8 *data)
++{
++	const struct bcmbca_xrdp_enet_variant *variant = enet->variant;
++	unsigned long *seen = enet->rx_seen;
++	unsigned int skip = BCMBCA_XRDP_RX_HEADROOM + info->offset;
++	unsigned int remaining = info->length;
++	u16 buffer = info->buffer;
++	u32 value;
++	int ret;
++
++	bitmap_zero(seen, variant->num_buffers);
++	while (remaining) {
++		unsigned int len = min(remaining, BCMBCA_XRDP_BUFFER_SIZE - skip);
++
++		if (test_and_set_bit(buffer, seen)) {
++			/* Do not ask SBPM to walk a cyclic list when freeing it. */
++			enet->faulted = true;
++			return -EIO;
++		}
++		if (data) {
++			memcpy_fromio(data, enet->base + variant->psram +
++				      buffer * BCMBCA_XRDP_BUFFER_SIZE + skip, len);
++			data += len;
++		}
++		remaining -= len;
++		skip = 0;
++		/* Even a single-buffer frame must end in a null list pointer. */
++		writel(buffer, enet->base + variant->sbpm + SBPM_NEXT);
++		ret = readl_poll_timeout(enet->base + variant->sbpm + SBPM_NEXT_REPLY,
++					 value, !(value & SBPM_BUSY), 1, 1000);
++		if (ret) {
++			enet->faulted = true;
++			dev_err(enet->dev, "SBPM next timeout head=%u buffer=%u reply=%08x\n",
++				info->buffer, buffer, value);
++			return ret;
++		}
++		if (value & SBPM_NULL)
++			return remaining ? -EIO : 0;
++		if (!remaining || !(value & SBPM_ACK) ||
++		    FIELD_GET(SBPM_BUFFER, value) >= variant->num_buffers) {
++			/* Free-without-context would follow this unvalidated tail. */
++			enet->faulted = true;
++			dev_err(enet->dev,
++				"invalid RX list: head=%u buffer=%u remaining=%u next_reply=%08x\n",
++				info->buffer, buffer, remaining, value);
++			return -EIO;
++		}
++		buffer = FIELD_GET(SBPM_BUFFER, value);
++	}
++	return 0;
++}
++
++static bool bcmbca_xrdp_receive(struct bcmbca_xrdp_enet *enet)
++{
++	const struct bcmbca_xrdp_enet_variant *variant = enet->variant;
++	void __iomem *desc = enet->base + variant->runner_sram + variant->rx_fifo +
++			     enet->rx_index * 16;
++	struct bcmbca_xrdp_rx_info info;
++	struct bcmbca_xrdp_port *port;
++	struct sk_buff *skb = NULL;
++	u32 word0, word1, word2;
++	int ret;
++
++	word1 = ioread32be(desc + 4);
++	if (!word1)
++		return false;
++	word0 = ioread32be(desc);
++	word2 = ioread32be(desc + 8);
++	/* Clearing word1 returns this descriptor to the Runner. */
++	writel(0, desc + 12);
++	writel(0, desc + 8);
++	writel(0, desc);
++	writel(0, desc + 4);
++	enet->rx_index = (enet->rx_index + 1) % variant->rx_fifo_size;
++
++	if (!bcmbca_xrdp_rx_decode(variant, word0, word1, word2, &info)) {
++		/* Without a valid length, we cannot bound the list before freeing. */
++		enet->faulted = true;
++		goto free_buffer;
++	}
++	port = enet->ports[info.port];
++	if (port && port->running) {
++		skb = netdev_alloc_skb_ip_align(port->ndev, info.length);
++		if (!skb)
++			port->ndev->stats.rx_dropped++;
++	}
++	/* Validate discarded frames too, without copying their payload. */
++	ret = bcmbca_xrdp_copy_rx(enet, &info, skb ? skb_put(skb, info.length) : NULL);
++	if (ret) {
++		if (port)
++			port->ndev->stats.rx_errors++;
++		dev_kfree_skb_any(skb);
++		goto free_buffer;
++	}
++	if (!skb)
++		goto free_buffer;
++	port->ndev->stats.rx_packets++;
++	port->ndev->stats.rx_bytes += info.length;
++	skb->protocol = eth_type_trans(skb, port->ndev);
++	netif_rx(skb);
++
++free_buffer:
++	bcmbca_xrdp_free(enet, info.buffer);
++	return true;
++}
++
++static int bcmbca_xrdp_transmit(struct bcmbca_xrdp_port *port, struct sk_buff *skb)
++{
++	struct bcmbca_xrdp_enet *enet = port->enet;
++	const struct bcmbca_xrdp_enet_variant *variant = enet->variant;
++	void __iomem *desc = enet->base + variant->runner_sram + variant->tx_descriptor;
++	u16 head = BCMBCA_XRDP_NULL_BUFFER, tail = 0, buffer;
++	unsigned int remaining = skb->len, offset = 0, count = 0;
++	int ret;
++
++	while (remaining) {
++		unsigned int len = min_t(unsigned int, remaining, BCMBCA_XRDP_BUFFER_SIZE);
++
++		ret = bcmbca_xrdp_alloc(enet, &buffer);
++		if (ret)
++			goto free_list;
++		memcpy_toio(enet->base + variant->psram + buffer * BCMBCA_XRDP_BUFFER_SIZE,
++			    skb->data + offset, len);
++		if (head == BCMBCA_XRDP_NULL_BUFFER) {
++			head = buffer;
++		} else {
++			ret = bcmbca_xrdp_connect(enet, tail, buffer);
++			if (ret) {
++				bcmbca_xrdp_free(enet, buffer);
++				goto free_list;
++			}
++		}
++		tail = buffer;
++		count++;
++		offset += len;
++		remaining -= len;
++	}
++
++	memset_io(desc, 0, 32);
++	iowrite32be(BIT(31) | (count << 14), desc + 4);
++	iowrite32be(BIT(30) | tail, desc + 8);
++	iowrite32be(BIT(30) | head, desc + 12);
++	iowrite32be(port->data->tx_destination,
++		    enet->base + variant->runner_sram + variant->tx_destination);
++	/* Publish the length only after the packet, descriptor and destination. */
++	iowrite16be(bcmbca_xrdp_tx_length_word(count, skb->len), desc + 6);
++	writel(CPU_TX_THREAD, enet->base + variant->runner_ctrl + RUNNER_WAKEUP);
++	port->tx_producer++;
++	return 0;
++
++free_list:
++	if (head != BCMBCA_XRDP_NULL_BUFFER)
++		bcmbca_xrdp_free(enet, head);
++	return ret;
++}
++
++static void bcmbca_xrdp_work(struct work_struct *work)
++{
++	struct bcmbca_xrdp_enet *enet = container_of(to_delayed_work(work),
++						struct bcmbca_xrdp_enet, work);
++	const struct bcmbca_xrdp_enet_variant *variant = enet->variant;
++	unsigned int i, budget;
++
++	mutex_lock(&enet->lock);
++	if (enet->stopping || enet->faulted)
++		goto out;
++	for (budget = 0; budget < variant->rx_fifo_size && !enet->faulted; budget++)
++		if (!bcmbca_xrdp_receive(enet))
++			break;
++	for (i = 0; i < variant->num_ports && !enet->faulted; i++) {
++		struct bcmbca_xrdp_port *port = enet->ports[i];
++		struct sk_buff *skb;
++
++		if (!port || !port->running)
++			continue;
++		for (budget = 0; budget < 8 && !enet->faulted; budget++) {
++			u16 length = ioread16be(enet->base + variant->runner_sram +
++					       variant->tx_descriptor + 6) & 0x3fff;
++			u8 consumer = readb(enet->base + variant->runner_sram +
++					    port->data->tx_counter);
++
++			if (!bcmbca_xrdp_tx_available(length, port->tx_producer, consumer))
++				break;
++			skb = skb_dequeue(&port->tx_queue);
++			if (!skb)
++				break;
++			if (bcmbca_xrdp_transmit(port, skb)) {
++				port->ndev->stats.tx_dropped++;
++				port->ndev->stats.tx_errors++;
++			} else {
++				port->ndev->stats.tx_packets++;
++				port->ndev->stats.tx_bytes += skb->len;
++			}
++			dev_consume_skb_any(skb);
++		}
++		if (skb_queue_len(&port->tx_queue) < TX_QUEUE_LEN / 2)
++			netif_wake_queue(port->ndev);
++	}
++	if (enet->faulted) {
++		dev_err(enet->dev, "packet engine stopped after SBPM failure\n");
++		for (i = 0; i < variant->num_ports; i++)
++			if (enet->ports[i])
++				netif_stop_queue(enet->ports[i]->ndev);
++	} else {
++		schedule_delayed_work(&enet->work, msecs_to_jiffies(1));
++	}
++out:
++	mutex_unlock(&enet->lock);
++}
++
++static struct bcmbca_xrdp_port *bcmbca_xrdp_config_port(struct phylink_config *config)
++{
++	return container_of(config, struct bcmbca_xrdp_port, phylink_config);
++}
++
++static void bcmbca_xrdp_mac_config(struct phylink_config *config, unsigned int mode,
++				   const struct phylink_link_state *state)
++{
++	struct bcmbca_xrdp_port *port = bcmbca_xrdp_config_port(config);
++	void __iomem *rgmii = port->enet->base + port->data->rgmii;
++	u32 value;
++
++	if (!port->data->rgmii)
++		return;
++	/* phylink passes the delay requirement to the PHY or switch peer. */
++	value = readl(rgmii);
++	value &= ~GENMASK(4, 1);
++	value |= BIT(0) | BIT(1) | (3 << 2);
++	writel(value, rgmii);
++	writel(0x28, rgmii + 8);
++}
++
++static void bcmbca_xrdp_mac_link_down(struct phylink_config *config,
++				      unsigned int mode, phy_interface_t interface)
++{
++	struct bcmbca_xrdp_port *port = bcmbca_xrdp_config_port(config);
++	u32 value = readl(port->mac + UMAC_CMD);
++
++	writel(value & ~(CMD_TX_EN | CMD_RX_EN), port->mac + UMAC_CMD);
++	if (port->data->rgmii)
++		writel(BIT(4), port->enet->base + port->data->rgmii + 4);
++}
++
++static void bcmbca_xrdp_mac_link_up(struct phylink_config *config,
++				    struct phy_device *phy, unsigned int mode,
++				    phy_interface_t interface, int speed, int duplex,
++				    bool tx_pause, bool rx_pause)
++{
++	struct bcmbca_xrdp_port *port = bcmbca_xrdp_config_port(config);
++	u32 rate = speed == SPEED_1000 ? 2 : speed == SPEED_100 ? 1 : 0;
++	u32 value = CMD_PROMISC | CMD_CRC_FWD | CMD_NO_LEN_CHK;
++
++	value |= rate << CMD_SPEED_SHIFT;
++	if (duplex == DUPLEX_HALF)
++		value |= CMD_HD_EN;
++	if (!tx_pause)
++		value |= CMD_TX_PAUSE_IGNORE;
++	if (!rx_pause)
++		value |= CMD_RX_PAUSE_IGNORE;
++	writel(value | CMD_TX_EN | CMD_RX_EN, port->mac + UMAC_CMD);
++	if (port->data->rgmii) {
++		value = BIT(4) | BIT(3) | rate;
++		if (duplex == DUPLEX_FULL)
++			value |= BIT(2);
++		writel(value, port->enet->base + port->data->rgmii + 4);
++	}
++}
++
++static const struct phylink_mac_ops bcmbca_xrdp_mac_ops = {
++	.mac_config = bcmbca_xrdp_mac_config,
++	.mac_link_down = bcmbca_xrdp_mac_link_down,
++	.mac_link_up = bcmbca_xrdp_mac_link_up,
++};
++
++static int bcmbca_xrdp_open(struct net_device *ndev)
++{
++	struct bcmbca_xrdp_port *port = netdev_priv(ndev);
++	struct bcmbca_xrdp_enet *enet = port->enet;
++
++	mutex_lock(&enet->lock);
++	if (enet->faulted) {
++		mutex_unlock(&enet->lock);
++		return -EIO;
++	}
++	port->running = true;
++	mutex_unlock(&enet->lock);
++	phylink_start(port->phylink);
++	netif_start_queue(ndev);
++	return 0;
++}
++
++static int bcmbca_xrdp_stop(struct net_device *ndev)
++{
++	struct bcmbca_xrdp_port *port = netdev_priv(ndev);
++
++	mutex_lock(&port->enet->lock);
++	port->running = false;
++	mutex_unlock(&port->enet->lock);
++	netif_tx_disable(ndev);
++	phylink_stop(port->phylink);
++	skb_queue_purge(&port->tx_queue);
++	return 0;
++}
++
++static netdev_tx_t bcmbca_xrdp_start_xmit(struct sk_buff *skb, struct net_device *ndev)
++{
++	struct bcmbca_xrdp_port *port = netdev_priv(ndev);
++
++	if (skb->len > BCMBCA_XRDP_FRAME_LEN || skb_linearize(skb)) {
++		dev_kfree_skb_any(skb);
++		ndev->stats.tx_dropped++;
++		return NETDEV_TX_OK;
++	}
++	if (skb_put_padto(skb, ETH_ZLEN)) {
++		ndev->stats.tx_dropped++;
++		return NETDEV_TX_OK;
++	}
++	skb_queue_tail(&port->tx_queue, skb);
++	if (skb_queue_len(&port->tx_queue) >= TX_QUEUE_LEN)
++		netif_stop_queue(ndev);
++	mod_delayed_work(system_percpu_wq, &port->enet->work, 0);
++	return NETDEV_TX_OK;
++}
++
++static int bcmbca_xrdp_ioctl(struct net_device *ndev, struct ifreq *ifr, int cmd)
++{
++	struct bcmbca_xrdp_port *port = netdev_priv(ndev);
++
++	return phylink_mii_ioctl(port->phylink, ifr, cmd);
++}
++
++static const struct net_device_ops bcmbca_xrdp_netdev_ops = {
++	.ndo_open = bcmbca_xrdp_open,
++	.ndo_stop = bcmbca_xrdp_stop,
++	.ndo_start_xmit = bcmbca_xrdp_start_xmit,
++	.ndo_set_mac_address = eth_mac_addr,
++	.ndo_validate_addr = eth_validate_addr,
++	.ndo_eth_ioctl = bcmbca_xrdp_ioctl,
++};
++
++static int bcmbca_xrdp_get_link_ksettings(struct net_device *ndev,
++					  struct ethtool_link_ksettings *cmd)
++{
++	struct bcmbca_xrdp_port *port = netdev_priv(ndev);
++
++	return phylink_ethtool_ksettings_get(port->phylink, cmd);
++}
++
++static int bcmbca_xrdp_set_link_ksettings(struct net_device *ndev,
++					  const struct ethtool_link_ksettings *cmd)
++{
++	struct bcmbca_xrdp_port *port = netdev_priv(ndev);
++
++	return phylink_ethtool_ksettings_set(port->phylink, cmd);
++}
++
++/* Free-running 32-bit UniMAC counters; reads do not clear them. */
++static const struct {
++	char name[ETH_GSTRING_LEN];
++	u16 offset;
++} bcmbca_xrdp_mib_stats[] = {
++	{ "mac_rx_packets", 0x28 },
++	{ "mac_rx_bytes", 0x2c },
++	{ "mac_rx_fcs_errors", 0x38 },
++	{ "mac_rx_alignment_errors", 0x48 },
++	{ "mac_rx_length_errors", 0x4c },
++	{ "mac_rx_code_errors", 0x50 },
++	{ "mac_rx_oversize", 0x58 },
++	{ "mac_rx_jabber", 0x5c },
++	{ "mac_rx_mtu_errors", 0x60 },
++	{ "mac_rx_good_packets", 0x64 },
++	{ "mac_rx_runts", 0x100 },
++	{ "mac_tx_packets", 0xa8 },
++	{ "mac_tx_fcs_errors", 0xbc },
++	{ "mac_tx_oversize", 0xc0 },
++	{ "mac_tx_bytes", 0xe8 },
++	{ "mac_tx_good_packets", 0xec },
++};
++
++static int bcmbca_xrdp_get_sset_count(struct net_device *ndev, int sset)
++{
++	if (sset != ETH_SS_STATS)
++		return -EOPNOTSUPP;
++	return ARRAY_SIZE(bcmbca_xrdp_mib_stats);
++}
++
++static void bcmbca_xrdp_get_strings(struct net_device *ndev, u32 sset, u8 *data)
++{
++	unsigned int i;
++
++	if (sset != ETH_SS_STATS)
++		return;
++	for (i = 0; i < ARRAY_SIZE(bcmbca_xrdp_mib_stats); i++) {
++		memcpy(data, bcmbca_xrdp_mib_stats[i].name, ETH_GSTRING_LEN);
++		data += ETH_GSTRING_LEN;
++	}
++}
++
++static void bcmbca_xrdp_get_stats(struct net_device *ndev,
++				  struct ethtool_stats *stats, u64 *data)
++{
++	struct bcmbca_xrdp_port *port = netdev_priv(ndev);
++	struct bcmbca_xrdp_enet *enet = port->enet;
++	void __iomem *mib = enet->base + port->data->mib;
++	unsigned int i;
++
++	mutex_lock(&enet->lock);
++	for (i = 0; i < ARRAY_SIZE(bcmbca_xrdp_mib_stats); i++)
++		data[i] = readl(mib + bcmbca_xrdp_mib_stats[i].offset);
++	mutex_unlock(&enet->lock);
++}
++
++static const struct ethtool_ops bcmbca_xrdp_ethtool_ops = {
++	.get_link = ethtool_op_get_link,
++	.get_link_ksettings = bcmbca_xrdp_get_link_ksettings,
++	.set_link_ksettings = bcmbca_xrdp_set_link_ksettings,
++	.get_sset_count = bcmbca_xrdp_get_sset_count,
++	.get_strings = bcmbca_xrdp_get_strings,
++	.get_ethtool_stats = bcmbca_xrdp_get_stats,
++};
++
++static int bcmbca_xrdp_port_create(struct bcmbca_xrdp_enet *enet, struct device_node *np)
++{
++	const struct bcmbca_xrdp_enet_variant *variant = enet->variant;
++	struct phylink_config *config;
++	struct bcmbca_xrdp_port *port;
++	phy_interface_t interface;
++	struct net_device *ndev;
++	u32 id, value;
++	int ret;
++
++	ret = of_property_read_u32(np, "reg", &id);
++	if (ret || id >= variant->num_ports || enet->ports[id])
++		return -EINVAL;
++	ret = of_get_phy_mode(np, &interface);
++	if (ret)
++		return ret;
++	ndev = alloc_etherdev(sizeof(*port));
++	if (!ndev)
++		return -ENOMEM;
++	SET_NETDEV_DEV(ndev, enet->dev);
++	ndev->dev.of_node = np;
++	port = netdev_priv(ndev);
++	port->enet = enet;
++	port->ndev = ndev;
++	port->data = &variant->ports[id];
++	port->mac = enet->base + port->data->mac;
++	port->tx_producer = readb(enet->base + variant->runner_sram +
++				 port->data->tx_counter);
++	skb_queue_head_init(&port->tx_queue);
++	ndev->netdev_ops = &bcmbca_xrdp_netdev_ops;
++	ndev->ethtool_ops = &bcmbca_xrdp_ethtool_ops;
++	ndev->dev_port = id;
++	ndev->min_mtu = ETH_MIN_MTU;
++	ndev->max_mtu = 2000;
++	ret = of_get_ethdev_address(np, ndev);
++	if (ret == -EPROBE_DEFER)
++		goto free_netdev;
++	if (ret)
++		eth_hw_addr_random(ndev);
++	netif_carrier_off(ndev);
++	config = &port->phylink_config;
++	config->dev = &ndev->dev;
++	config->type = PHYLINK_NETDEV;
++	config->mac_capabilities = MAC_SYM_PAUSE | MAC_ASYM_PAUSE |
++				   MAC_10 | MAC_100 | MAC_1000FD;
++	if (port->data->rgmii)
++		phy_interface_set_rgmii(config->supported_interfaces);
++	else
++		__set_bit(PHY_INTERFACE_MODE_GMII, config->supported_interfaces);
++	port->phylink = phylink_create(config, of_fwnode_handle(np), interface,
++				       &bcmbca_xrdp_mac_ops);
++	if (IS_ERR(port->phylink)) {
++		ret = PTR_ERR(port->phylink);
++		goto free_netdev;
++	}
++	ret = phylink_fwnode_phy_connect(port->phylink, of_fwnode_handle(np), 0);
++	if (ret)
++		goto destroy_phylink;
++
++	writel(CMD_PROMISC | CMD_CRC_FWD | CMD_NO_LEN_CHK,
++	       port->mac + UMAC_CMD);
++	writel(BCMBCA_XRDP_FRAME_LEN, port->mac + UMAC_MAX_FRAME_LEN);
++	value = readl(port->mac + UMAC_TX_IPG_LEN);
++	writel((value & ~GENMASK(6, 0)) | 12, port->mac + UMAC_TX_IPG_LEN);
++	value = readl(enet->base + port->data->mac_top);
++	writel(value | BIT(0), enet->base + port->data->mac_top);
++	value = readl(enet->base + port->data->mac_top + 4);
++	value = (value & ~GENMASK(13, 0)) | BCMBCA_XRDP_FRAME_LEN;
++	writel(value, enet->base + port->data->mac_top + 4);
++	/* Allow DSA tags in addition to the Ethernet frame. */
++	value = BCMBCA_XRDP_FRAME_LEN | (BCMBCA_XRDP_FRAME_LEN << 16);
++	writel(value, enet->base + port->data->bbh_rx + BBH_RX_MAXPKT0);
++	writel(value, enet->base + port->data->bbh_rx + BBH_RX_MAXPKT1);
++	ret = register_netdev(ndev);
++	if (ret)
++		goto disconnect_phy;
++	enet->ports[id] = port;
++	netdev_info(ndev, "UniMAC%u, reduced XRDP SRAM datapath\n", id);
++	return 0;
++
++disconnect_phy:
++	rtnl_lock();
++	phylink_disconnect_phy(port->phylink);
++	rtnl_unlock();
++destroy_phylink:
++	phylink_destroy(port->phylink);
++free_netdev:
++	free_netdev(ndev);
++	return ret;
++}
++
++static void bcmbca_xrdp_ports_destroy(struct bcmbca_xrdp_enet *enet)
++{
++	const struct bcmbca_xrdp_enet_variant *variant = enet->variant;
++	unsigned int i;
++
++	for (i = 0; i < variant->num_ports; i++) {
++		struct bcmbca_xrdp_port *port = enet->ports[i];
++
++		if (!port)
++			continue;
++		unregister_netdev(port->ndev);
++		rtnl_lock();
++		phylink_disconnect_phy(port->phylink);
++		rtnl_unlock();
++		phylink_destroy(port->phylink);
++		free_netdev(port->ndev);
++		enet->ports[i] = NULL;
++	}
++}
++
++static int bcm6846_xrdp_qegphy_powerup(void __iomem *ctrl, u32 port_mask)
++{
++	u32 mask = BCM6846_QEGPHY_RESET | BCM6846_QEGPHY_PLL_250 |
++		   BCM6846_QEGPHY_IDDQ_BIAS | BCM6846_QEGPHY_IDDQ_GLOBAL |
++		   BCM6846_QEGPHY_EXT_PWR_DOWN;
++	u32 val = readl(ctrl);
++
++	/* BCM6846 vendor _phy_cfg(): reset, 250 MHz, power up, 125 MHz. */
++	val |= BCM6846_QEGPHY_RESET;
++	writel(val, ctrl);
++	usleep_range(1000, 2000);
++	val |= BCM6846_QEGPHY_PLL_250;
++	writel(val, ctrl);
++	usleep_range(1000, 2000);
++	val &= ~(BCM6846_QEGPHY_IDDQ_BIAS | BCM6846_QEGPHY_IDDQ_GLOBAL);
++	writel(val, ctrl);
++	usleep_range(1000, 2000);
++	/* Preserve the base address at which MDIO discovered the PHYs. */
++	val &= ~BCM6846_QEGPHY_EXT_PWR_DOWN;
++	val |= FIELD_PREP(BCM6846_QEGPHY_EXT_PWR_DOWN, ~port_mask & 0xf);
++	writel(val, ctrl);
++	usleep_range(1000, 2000);
++	val &= ~BCM6846_QEGPHY_PLL_250;
++	writel(val, ctrl);
++	val &= ~BCM6846_QEGPHY_RESET;
++	writel(val, ctrl);
++	usleep_range(1000, 2000);
++
++	return (readl(ctrl) & mask) == (val & mask) ? 0 : -EIO;
++}
++
++static int bcm6846_xrdp_phy_init(struct bcmbca_xrdp_enet *enet,
++				 struct device_node *ports)
++{
++	struct device_node *phy_np __free(device_node) = NULL;
++	struct phy_device *phydev;
++	u32 port_mask = 0;
++	int ret;
++
++	for_each_available_child_of_node_scoped(ports, np) {
++		u32 id;
++
++		ret = of_property_read_u32(np, "reg", &id);
++		if (ret)
++			return ret;
++		/* UniMAC0..3 use QEGPHY; UniMAC4 is the external RGMII link. */
++		if (id >= 4)
++			continue;
++		port_mask |= BIT(id);
++		if (!phy_np) {
++			phy_np = of_parse_phandle(np, "phy-handle", 0);
++			if (!phy_np)
++				return -EINVAL;
++		}
++	}
++	if (!port_mask)
++		return 0;
++
++	phydev = of_phy_find_device(phy_np);
++	if (!phydev)
++		return -EPROBE_DEFER;
++
++	/* All four PHYs share reset. Exclude MDIO until it is released. */
++	phy_lock_mdio_bus(phydev);
++	ret = bcm6846_xrdp_qegphy_powerup(enet->base + BCM6846_QEGPHY_CTRL,
++					  port_mask);
++	phy_unlock_mdio_bus(phydev);
++	put_device(&phydev->mdio.dev);
++
++	return ret;
++}
++
++static int bcmbca_xrdp_probe(struct platform_device *pdev)
++{
++	const struct bcmbca_xrdp_enet_variant *variant;
++	struct device *dev = &pdev->dev;
++	struct device_node *ports;
++	struct bcmbca_xrdp_enet *enet;
++	struct resource *res;
++	int ret;
++
++	variant = device_get_match_data(dev);
++	if (!variant)
++		return -ENODEV;
++	enet = devm_kzalloc(dev, struct_size(enet, ports, variant->num_ports),
++			    GFP_KERNEL);
++	if (!enet)
++		return -ENOMEM;
++	enet->dev = dev;
++	enet->variant = variant;
++	enet->rx_seen = devm_bitmap_zalloc(dev, variant->num_buffers, GFP_KERNEL);
++	if (!enet->rx_seen)
++		return -ENOMEM;
++	enet->reset = devm_reset_control_get_exclusive(dev, NULL);
++	if (IS_ERR(enet->reset))
++		return dev_err_probe(dev, PTR_ERR(enet->reset), "cannot get XRDP reset\n");
++	ret = devm_clk_bulk_get_all(dev, &enet->clks);
++	if (ret <= 0)
++		return dev_err_probe(dev, ret ?: -ENODEV, "cannot get XRDP clocks\n");
++	enet->num_clks = ret;
++	res = platform_get_resource(pdev, IORESOURCE_MEM, 0);
++	if (!res || resource_size(res) != variant->reg_size)
++		return -EINVAL;
++	enet->base = devm_ioremap_resource(dev, res);
++	if (IS_ERR(enet->base))
++		return PTR_ERR(enet->base);
++	mutex_init(&enet->lock);
++	INIT_DELAYED_WORK(&enet->work, bcmbca_xrdp_work);
++	platform_set_drvdata(pdev, enet);
++	ports = of_get_child_by_name(dev->of_node, "ethernet-ports");
++	if (!ports)
++		return -EINVAL;
++	ret = bcmbca_xrdp_hw_init(enet);
++	if (ret)
++		goto put_ports;
++	/* The common reset must precede every per-PHY calibration/attach. */
++	if (variant == &bcm6846_variant) {
++		ret = bcm6846_xrdp_phy_init(enet, ports);
++		if (ret) {
++			dev_err_probe(dev, ret, "QEGPHY power-up failed\n");
++			goto put_ports;
++		}
++	}
++	for_each_available_child_of_node_scoped(ports, np) {
++		ret = bcmbca_xrdp_port_create(enet, np);
++		if (ret)
++			goto destroy_ports;
++	}
++	of_node_put(ports);
++	schedule_delayed_work(&enet->work, 0);
++	return 0;
++
++destroy_ports:
++	mutex_lock(&enet->lock);
++	enet->stopping = true;
++	mutex_unlock(&enet->lock);
++	bcmbca_xrdp_ports_destroy(enet);
++	cancel_delayed_work_sync(&enet->work);
++put_ports:
++	bcmbca_xrdp_hw_stop(enet);
++	of_node_put(ports);
++	return dev_err_probe(dev, ret, "failed to initialize XRDP\n");
++}
++
++static void bcmbca_xrdp_remove(struct platform_device *pdev)
++{
++	struct bcmbca_xrdp_enet *enet = platform_get_drvdata(pdev);
++
++	mutex_lock(&enet->lock);
++	enet->stopping = true;
++	mutex_unlock(&enet->lock);
++	bcmbca_xrdp_ports_destroy(enet);
++	cancel_delayed_work_sync(&enet->work);
++	bcmbca_xrdp_hw_stop(enet);
++}
++
++static const struct of_device_id bcmbca_xrdp_of_match[] = {
++	{ .compatible = "brcm,bcm6846-enet", .data = &bcm6846_variant },
++	{ }
++};
++MODULE_DEVICE_TABLE(of, bcmbca_xrdp_of_match);
++
++static struct platform_driver bcmbca_xrdp_driver = {
++	.probe = bcmbca_xrdp_probe,
++	.remove = bcmbca_xrdp_remove,
++	.shutdown = bcmbca_xrdp_remove,
++	.driver = {
++		.name = "bcmbca-xrdp-enet",
++		.of_match_table = bcmbca_xrdp_of_match,
++	},
++};
++module_platform_driver(bcmbca_xrdp_driver);
++
++MODULE_DESCRIPTION("Broadcom BCMBCA reduced XRDP Ethernet");
++MODULE_LICENSE("GPL");
+diff --git a/drivers/net/ethernet/broadcom/bcmbca_xrdp.h b/drivers/net/ethernet/broadcom/bcmbca_xrdp.h
+new file mode 100644
+index 000000000000..ea8a5edfe6fb
+--- /dev/null
++++ b/drivers/net/ethernet/broadcom/bcmbca_xrdp.h
+@@ -0,0 +1,96 @@
++/* SPDX-License-Identifier: GPL-2.0-or-later */
++#ifndef BCMBCA_XRDP_H
++#define BCMBCA_XRDP_H
++
++#include <linux/bitfield.h>
++#include <linux/types.h>
++
++#define BCMBCA_XRDP_FRAME_LEN	2047
++#define BCMBCA_XRDP_BUFFER_SIZE	128
++#define BCMBCA_XRDP_RX_HEADROOM	18
++#define BCMBCA_XRDP_NULL_BUFFER	0x3fff
++
++#define BCMBCA_XRDP_RX_BUFFER	GENMASK(31, 14)
++#define BCMBCA_XRDP_RX_LENGTH	GENMASK(15, 2)
++#define BCMBCA_XRDP_RX_ABSOLUTE	BIT(16)
++#define BCMBCA_XRDP_RX_OFFSET	GENMASK(12, 6)
++#define BCMBCA_XRDP_RX_PORT		GENMASK(29, 25)
++
++struct bcmbca_xrdp_init_entry {
++	u32 command;
++	u32 value;
++};
++
++/* Register offsets are relative to the XRDP resource. */
++struct bcmbca_xrdp_port_data {
++	u32 mac;
++	u32 mib;
++	u32 mac_top;
++	u32 bbh_rx;
++	u32 rgmii; /* Zero for ports without an RGMII interface. */
++	u16 tx_destination;
++	u16 tx_counter; /* Offset within Runner SRAM. */
++};
++
++/* Layout of an XRDP implementation using the reduced SBPM packet ABI. */
++struct bcmbca_xrdp_enet_variant {
++	const struct bcmbca_xrdp_init_entry *init_data;
++	unsigned int init_data_size;
++	u32 init_base; /* Physical base used by the recorded initialization. */
++	u32 reg_size;
++	u32 sbpm;
++	u32 psram;
++	u32 runner_ctrl;
++	u32 runner_stride;
++	u32 runner_sram;
++	/* Packet table offsets are relative to runner_sram. */
++	u32 rx_fifo;
++	u32 tx_descriptor;
++	u32 tx_destination;
++	unsigned int rx_fifo_size;
++	unsigned int num_runners;
++	unsigned int num_buffers;
++	unsigned int num_ports;
++	/* SBPM source addresses for CPU allocation and RX release commands. */
++	u8 sbpm_alloc_sa;
++	u8 sbpm_free_sa;
++	const struct bcmbca_xrdp_port_data *ports;
++};
++
++struct bcmbca_xrdp_rx_info {
++	u16 buffer;
++	u16 length;
++	u8 offset;
++	u8 port;
++};
++
++static inline bool
++bcmbca_xrdp_rx_decode(const struct bcmbca_xrdp_enet_variant *variant,
++		      u32 word0, u32 word1, u32 word2,
++		      struct bcmbca_xrdp_rx_info *info)
++{
++	u32 buffer = FIELD_GET(BCMBCA_XRDP_RX_BUFFER, word0);
++
++	info->length = FIELD_GET(BCMBCA_XRDP_RX_LENGTH, word1);
++	info->offset = FIELD_GET(BCMBCA_XRDP_RX_OFFSET, word2);
++	info->port = FIELD_GET(BCMBCA_XRDP_RX_PORT, word2);
++	info->buffer = buffer;
++
++	return !(word1 & BCMBCA_XRDP_RX_ABSOLUTE) && buffer < variant->num_buffers &&
++	       info->length >= 14 && info->length <= BCMBCA_XRDP_FRAME_LEN &&
++	       info->port < variant->num_ports &&
++	       info->offset + BCMBCA_XRDP_RX_HEADROOM < BCMBCA_XRDP_BUFFER_SIZE;
++}
++
++static inline bool bcmbca_xrdp_tx_available(u16 length, u8 producer, u8 consumer)
++{
++	return !length && (u8)(producer - consumer) < 8;
++}
++
++static inline u16 bcmbca_xrdp_tx_length_word(unsigned int buffers, unsigned int len)
++{
++	/* BN_NUM straddles the halfword containing PACKET_LENGTH. */
++	return ((buffers & 3) << 14) | len;
++}
++
++#endif

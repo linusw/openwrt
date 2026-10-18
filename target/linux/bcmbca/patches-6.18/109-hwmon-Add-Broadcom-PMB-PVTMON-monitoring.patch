@@ -1,0 +1,414 @@
+From 04907634d018e36baa0cbd8016c741a2025100d4 Mon Sep 17 00:00:00 2001
+From: Linus Walleij <linusw@kernel.org>
+Date: Mon, 19 Oct 2026 15:44:32 +0200
+Subject: [PATCH] hwmon: Add Broadcom PMB PVTMON monitoring
+
+Expose the BCM6846 die temperature and seven voltage inputs through
+hwmon using the shared Processor Monitor Bus (PMB) transport. Use the
+vendor voltage-divider ratios and labels, including the diagnostic test
+input. Register the temperature channel with the thermal framework so
+existing zero-cell device-tree thermal sensor references work.
+
+Obtain the acquisition clock and reset from the sibling PMB providers.
+Preserve acquisition configured by Power Management Controller (PMC)
+firmware and enable missing channels with 32-sample averaging. Leave
+acquisition running on removal because firmware can also use it.
+
+Poll for valid samples with a bounded timeout, releasing the PMB lock
+between reads. Report temperature in millidegrees Celsius, including
+negative values, and voltages in millivolts.
+
+Signed-off-by: Linus Walleij <linusw@kernel.org>
+
+---
+diff --git a/Documentation/hwmon/bcm_pmb_pvtmon.rst b/Documentation/hwmon/bcm_pmb_pvtmon.rst
+new file mode 100644
+index 000000000000..f9ed87088327
+--- /dev/null
++++ b/Documentation/hwmon/bcm_pmb_pvtmon.rst
+@@ -0,0 +1,58 @@
++.. SPDX-License-Identifier: GPL-2.0-only
++
++Kernel driver bcm_pmb_pvtmon
++============================
++
++Supported chips:
++
++  * Broadcom BCM6846 PVTMON
++
++    Access: Processor Monitor Bus (PMB), bus 1, device 6
++
++Author: Linus Walleij <linusw@kernel.org>
++
++Description
++-----------
++
++The process, voltage and temperature monitor (PVTMON) measures die
++temperature and seven voltage inputs. The driver uses the shared PMB MFD
++transport and obtains its clock and reset from the sibling providers.
++
++Acquisition is shared with Power Management Controller (PMC) firmware.
++The driver preserves enabled channels, enables missing channels with
++32-sample averaging, and leaves acquisition running when unbound. Reads
++wait up to 100 ms for a valid sample and propagate PMB access errors.
++
++With CONFIG_THERMAL_OF enabled, the temperature channel also supplies
++device-tree thermal zones. The PVTMON node uses #thermal-sensor-cells = <0>;
++voltage inputs do not have thermal sensor indices.
++
++Sysfs attributes
++----------------
++
++All attributes are read-only. Temperature is reported in millidegrees
++Celsius and voltages in millivolts, using the BCM6846 vendor conversion
++formulas and input-divider ratios.
++
++================ ================================
++Attribute        Description
++================ ================================
++temp1_input      Die temperature
++in0_input        First 0.85 V input
++in1_input        Second 0.85 V input
++in2_input        VIN input
++in3_input        1.0 V input
++in4_input        1.8 V input
++in5_input        3.3 V input
++in6_input        Diagnostic test input
++in0_label        V0.85_1
++in1_label        V0.85_2
++in2_label        VIN
++in3_label        V1.0
++in4_label        V1.8
++in5_label        V3.3
++in6_label        Vtest
++================ ================================
++
++Labels follow the vendor channel names. Vtest is a diagnostic ADC input,
++not a supply rail. The driver does not change the analog test routing.
+diff --git a/Documentation/hwmon/index.rst b/Documentation/hwmon/index.rst
+index 51a5bdf75b08..e13584b4784c 100644
+--- a/Documentation/hwmon/index.rst
++++ b/Documentation/hwmon/index.rst
+@@ -50,6 +50,7 @@ Hardware Monitoring Kernel Drivers
+    asus_rog_ryujin
+    asus_wmi_sensors
+    bcm54140
++   bcm_pmb_pvtmon
+    bel-pfe
+    bpa-rs600
+    bt1-pvt
+diff --git a/drivers/hwmon/Kconfig b/drivers/hwmon/Kconfig
+index e54ab1025f22..521baa44f42c 100644
+--- a/drivers/hwmon/Kconfig
++++ b/drivers/hwmon/Kconfig
+@@ -311,6 +311,23 @@ config SENSORS_AXI_FAN_CONTROL
+ 	  This driver can also be built as a module. If so, the module
+ 	  will be called axi-fan-control
+ 
++config SENSORS_BCM_PMB_PVTMON
++	tristate "Broadcom PMB PVTMON hardware monitoring"
++	depends on ARCH_BCMBCA || COMPILE_TEST
++	depends on MFD_BCMBCA_PMB
++	depends on COMMON_CLK
++	depends on RESET_CONTROLLER
++	select CLK_BCMBCA_PMB
++	select RESET_BCMBCA_PMB
++	default MFD_BCMBCA_PMB
++	help
++	  Enable temperature and voltage monitoring through the Processor
++	  Monitor Bus on Broadcom BCM6846. The PMB MFD driver provides
++	  register access. With THERMAL_OF enabled, the temperature channel
++	  also supplies the thermal zones described in the device tree.
++
++	  This driver can also be built as a module called bcm_pmb_pvtmon.
++
+ config SENSORS_K8TEMP
+ 	tristate "AMD Athlon64/FX or Opteron temperature sensor"
+ 	depends on X86 && PCI
+diff --git a/drivers/hwmon/Makefile b/drivers/hwmon/Makefile
+index 73b2abdcc6dd..241fd423feba 100644
+--- a/drivers/hwmon/Makefile
++++ b/drivers/hwmon/Makefile
+@@ -58,6 +58,7 @@ obj-$(CONFIG_SENSORS_ASPEED_G6) += aspeed-g6-pwm-tach.o
+ obj-$(CONFIG_SENSORS_ASUS_ROG_RYUJIN)	+= asus_rog_ryujin.o
+ obj-$(CONFIG_SENSORS_ATXP1)	+= atxp1.o
+ obj-$(CONFIG_SENSORS_AXI_FAN_CONTROL) += axi-fan-control.o
++obj-$(CONFIG_SENSORS_BCM_PMB_PVTMON) += bcm_pmb_pvtmon.o
+ obj-$(CONFIG_SENSORS_BT1_PVT)	+= bt1-pvt.o
+ obj-$(CONFIG_SENSORS_CGBC)	+= cgbc-hwmon.o
+ obj-$(CONFIG_SENSORS_CHIPCAP2) += chipcap2.o
+diff --git a/drivers/hwmon/bcm_pmb_pvtmon.c b/drivers/hwmon/bcm_pmb_pvtmon.c
+new file mode 100644
+index 000000000000..fbfabb9d1ae3
+--- /dev/null
++++ b/drivers/hwmon/bcm_pmb_pvtmon.c
+@@ -0,0 +1,269 @@
++// SPDX-License-Identifier: GPL-2.0-only
++/*
++ * Broadcom BCM6846 process, voltage and temperature monitor (PVTMON).
++ * The Processor Monitor Bus (PMB) exposes die temperature and seven voltages.
++ * Acquisition is shared with Power Management Controller (PMC) firmware.
++ * Preserve active channels and leave acquisition running for firmware users.
++ */
++
++#include <linux/bitfield.h>
++#include <linux/clk.h>
++#include <linux/hwmon.h>
++#include <linux/iopoll.h>
++#include <linux/mfd/bcmbca-pmb.h>
++#include <linux/mod_devicetable.h>
++#include <linux/module.h>
++#include <linux/platform_device.h>
++#include <linux/reset.h>
++
++#define PVTMON_BUS		1
++#define PVTMON_DEVICE		6
++
++/* PMB register offsets are in 32-bit words. */
++#define PVTMON_CONFIG		17
++#define PVTMON_RESET_N		BIT(0)
++#define PVTMON_POWER_DOWN		BIT(1)
++
++#define PVTMON_ACQ_CONFIG		20
++#define PVTMON_ACCUM_ENABLE	BIT(0)
++#define PVTMON_SKIP_LENGTH	GENMASK(11, 8)
++
++#define PVTMON_CHANNEL_BASE	24
++#define PVTMON_NUM_CHANNELS	8
++#define PVTMON_VALUE		GENMASK(9, 0)
++#define PVTMON_VALID		BIT(18)
++#define PVTMON_SAMPLES		GENMASK(26, 24)
++#define PVTMON_CHANNEL_ENABLE	BIT(31)
++
++/* Voltage labels and divider ratios follow the BCM6846 vendor definitions. */
++static const struct {
++	const char *label;
++	unsigned int divisor;
++} bcm6846_pvtmon_voltages[] = {
++	{ "V0.85_1", 10 },
++	{ "V0.85_2", 10 },
++	{ "VIN", 7 },
++	{ "V1.0", 7 },
++	{ "V1.8", 4 },
++	{ "V3.3", 2 },
++	{ "Vtest", 10 },
++};
++
++static int bcm_pmb_pvtmon_init(struct bcmbca_pmb *pmb,
++			       struct reset_control *reset)
++{
++	u32 config, acq, channel;
++	unsigned int i;
++	int ret;
++
++	ret = bcmbca_pmb_lock(pmb);
++	if (ret)
++		return ret;
++
++	ret = bcmbca_pmb_read(pmb, PVTMON_BUS, PVTMON_DEVICE,
++			      PVTMON_CONFIG, &config);
++	if (ret)
++		goto unlock;
++
++	/* Do not reset acquisition already running for the PMC firmware. */
++	if ((config & (PVTMON_RESET_N | PVTMON_POWER_DOWN)) != PVTMON_RESET_N) {
++		config &= ~PVTMON_POWER_DOWN;
++		ret = bcmbca_pmb_write(pmb, PVTMON_BUS, PVTMON_DEVICE,
++				       PVTMON_CONFIG, config);
++		if (ret)
++			goto unlock;
++
++		/* The reset controller takes the same PMB transport lock. */
++		bcmbca_pmb_unlock(pmb);
++		ret = reset_control_reset(reset);
++		if (ret)
++			return ret;
++		ret = bcmbca_pmb_lock(pmb);
++		if (ret)
++			return ret;
++	}
++
++	ret = bcmbca_pmb_read(pmb, PVTMON_BUS, PVTMON_DEVICE,
++			      PVTMON_ACQ_CONFIG, &acq);
++	if (ret)
++		goto unlock;
++
++	for (i = 0; i < PVTMON_NUM_CHANNELS; i++) {
++		ret = bcmbca_pmb_read(pmb, PVTMON_BUS, PVTMON_DEVICE,
++				      PVTMON_CHANNEL_BASE + i, &channel);
++		if (ret)
++			goto unlock;
++
++		if (channel & PVTMON_CHANNEL_ENABLE)
++			continue;
++
++		/* Average 32 samples, matching the vendor acquisition setup. */
++		ret = bcmbca_pmb_write(pmb, PVTMON_BUS, PVTMON_DEVICE,
++				       PVTMON_CHANNEL_BASE + i,
++				       PVTMON_CHANNEL_ENABLE |
++				       FIELD_PREP(PVTMON_SAMPLES, 5));
++		if (ret)
++			goto unlock;
++	}
++
++	if (!(acq & PVTMON_ACCUM_ENABLE)) {
++		acq &= ~PVTMON_SKIP_LENGTH;
++		acq |= PVTMON_ACCUM_ENABLE | FIELD_PREP(PVTMON_SKIP_LENGTH, 8);
++		ret = bcmbca_pmb_write(pmb, PVTMON_BUS, PVTMON_DEVICE,
++				       PVTMON_ACQ_CONFIG, acq);
++	}
++
++unlock:
++	bcmbca_pmb_unlock(pmb);
++	return ret;
++}
++
++static int bcm_pmb_pvtmon_read_sample(struct bcmbca_pmb *pmb,
++				      unsigned int channel, u32 *value)
++{
++	int ret;
++
++	ret = bcmbca_pmb_lock(pmb);
++	if (ret)
++		return ret;
++
++	ret = bcmbca_pmb_read(pmb, PVTMON_BUS, PVTMON_DEVICE,
++			      PVTMON_CHANNEL_BASE + channel, value);
++	bcmbca_pmb_unlock(pmb);
++
++	return ret;
++}
++
++static int bcm_pmb_pvtmon_read(struct device *dev, enum hwmon_sensor_types type,
++			       u32 attr, int channel, long *val)
++{
++	struct bcmbca_pmb *pmb = dev_get_drvdata(dev);
++	unsigned int index;
++	u32 value;
++	int ret, err;
++
++	switch (type) {
++	case hwmon_temp:
++		if (attr != hwmon_temp_input)
++			return -EOPNOTSUPP;
++		index = 0;
++		break;
++	case hwmon_in:
++		if (attr != hwmon_in_input)
++			return -EOPNOTSUPP;
++		index = channel + 1;
++		break;
++	default:
++		return -EOPNOTSUPP;
++	}
++
++	/* Release the PMB between samples so other clients can make progress. */
++	err = read_poll_timeout(bcm_pmb_pvtmon_read_sample, ret,
++				ret || (value & PVTMON_VALID), 1000, 100000,
++				false, pmb, index, &value);
++	if (ret)
++		return ret;
++	if (err)
++		return err;
++
++	value = FIELD_GET(PVTMON_VALUE, value);
++	if (type == hwmon_temp) {
++		/* Signed arithmetic allows temperatures below zero Celsius. */
++		*val = (41335000 - 49055 * (int)value) / 100;
++	} else {
++		/* 880 mV ADC reference, accounting for each input divider. */
++		*val = 880 * value * 10 /
++			(bcm6846_pvtmon_voltages[channel].divisor * 1024);
++	}
++
++	return 0;
++}
++
++static int bcm_pmb_pvtmon_read_string(struct device *dev,
++				      enum hwmon_sensor_types type, u32 attr,
++				      int channel, const char **str)
++{
++	if (type != hwmon_in || attr != hwmon_in_label)
++		return -EOPNOTSUPP;
++
++	*str = bcm6846_pvtmon_voltages[channel].label;
++	return 0;
++}
++
++static const struct hwmon_ops bcm_pmb_pvtmon_ops = {
++	.visible = 0444,
++	.read = bcm_pmb_pvtmon_read,
++	.read_string = bcm_pmb_pvtmon_read_string,
++};
++
++static const struct hwmon_channel_info * const bcm_pmb_pvtmon_info[] = {
++	HWMON_CHANNEL_INFO(chip, HWMON_C_REGISTER_TZ),
++	HWMON_CHANNEL_INFO(temp, HWMON_T_INPUT),
++	HWMON_CHANNEL_INFO(in,
++			   HWMON_I_INPUT | HWMON_I_LABEL,
++			   HWMON_I_INPUT | HWMON_I_LABEL,
++			   HWMON_I_INPUT | HWMON_I_LABEL,
++			   HWMON_I_INPUT | HWMON_I_LABEL,
++			   HWMON_I_INPUT | HWMON_I_LABEL,
++			   HWMON_I_INPUT | HWMON_I_LABEL,
++			   HWMON_I_INPUT | HWMON_I_LABEL),
++	NULL
++};
++
++static const struct hwmon_chip_info bcm_pmb_pvtmon_chip_info = {
++	.ops = &bcm_pmb_pvtmon_ops,
++	.info = bcm_pmb_pvtmon_info,
++};
++
++static int bcm_pmb_pvtmon_probe(struct platform_device *pdev)
++{
++	struct device *dev = &pdev->dev;
++	struct device *hwmon;
++	struct reset_control *reset;
++	struct bcmbca_pmb *pmb;
++	struct clk *clk;
++	int ret;
++
++	pmb = bcmbca_pmb_get(dev);
++	if (IS_ERR(pmb))
++		return PTR_ERR(pmb);
++
++	reset = devm_reset_control_get_exclusive(dev, NULL);
++	if (IS_ERR(reset))
++		return dev_err_probe(dev, PTR_ERR(reset), "failed to get PVTMON reset\n");
++
++	clk = devm_clk_get_enabled(dev, NULL);
++	if (IS_ERR(clk))
++		return dev_err_probe(dev, PTR_ERR(clk), "failed to enable PVTMON clock\n");
++
++	ret = bcm_pmb_pvtmon_init(pmb, reset);
++	if (ret)
++		return dev_err_probe(dev, ret, "failed to initialize PVTMON\n");
++
++	hwmon = devm_hwmon_device_register_with_info(dev, "bcm6846_pvtmon", pmb,
++						     &bcm_pmb_pvtmon_chip_info, NULL);
++	if (IS_ERR(hwmon))
++		return dev_err_probe(dev, PTR_ERR(hwmon), "failed to register hwmon device\n");
++
++	/* Acquisition remains enabled for the PMC firmware after unbinding. */
++	return 0;
++}
++
++static const struct of_device_id bcm_pmb_pvtmon_of_match[] = {
++	{ .compatible = "brcm,bcm6846-pmb-pvtmon" },
++	{ }
++};
++MODULE_DEVICE_TABLE(of, bcm_pmb_pvtmon_of_match);
++
++static struct platform_driver bcm_pmb_pvtmon_driver = {
++	.probe = bcm_pmb_pvtmon_probe,
++	.driver = {
++		.name = "bcm6846-pmb-pvtmon",
++		.of_match_table = bcm_pmb_pvtmon_of_match,
++	},
++};
++module_platform_driver(bcm_pmb_pvtmon_driver);
++
++MODULE_AUTHOR("Linus Walleij <linusw@kernel.org>");
++MODULE_DESCRIPTION("Broadcom PMB PVTMON hardware monitoring driver");
++MODULE_LICENSE("GPL");

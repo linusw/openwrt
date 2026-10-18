@@ -1,0 +1,136 @@
+From 05537ff9f5906d88548a464948d407aced25ff28 Mon Sep 17 00:00:00 2001
+From: Linus Walleij <linusw@kernel.org>
+Date: Mon, 12 Oct 2026 00:24:45 +0200
+Subject: [PATCH] ARM: bcm: Add CFE SMP support for the Genexis XG6846B
+
+The XG6846B CFE bootloader powers up CPU1 and leaves it in a holding pen
+waiting for an interrupt. After waking, the stub reads the GPIO
+GeneralPurpose register at 0xff800568 and branches to the stored address
+in ARM state. The vendor kernel uses this mailbox and a wakeup IPI.
+
+Add a machine SMP fallback for the XG6846B when PSCI is unavailable.
+Read the mailbox address from the secondary CPU's cpu-release-addr
+property. Map it as device memory, write secondary_startup_arm and
+complete the write before sending the wakeup IPI. CPU1 is already
+running, so no power or reset sequence is needed. Using the ARM entry
+also supports kernels built in Thumb-2 mode. Clear any Thumb function
+pointer tag before programming this ARM entry address.
+
+Build the BCMBCA machine description independently of DEBUG_BCMBCA,
+keeping the debug UART mapping conditional. Restrict the fallback to
+the XG6846B and retain the generic PSCI path when firmware provides it.
+
+Suggested-by: William Zhang <william.zhang@broadcom.com>
+Assisted-by: LLM
+Signed-off-by: Linus Walleij <linusw@kernel.org>
+
+---
+diff --git a/arch/arm/mach-bcm/Makefile b/arch/arm/mach-bcm/Makefile
+index 6baedf4c6304..fcc4e0174adc 100644
+--- a/arch/arm/mach-bcm/Makefile
++++ b/arch/arm/mach-bcm/Makefile
+@@ -58,6 +58,6 @@ endif
+ 
+ # BCMBCA
+ ifeq ($(CONFIG_ARCH_BCMBCA),y)
+-obj-$(CONFIG_DEBUG_BCMBCA)	+= board_bcmbca.o
++obj-y				+= board_bcmbca.o
+ obj-$(CONFIG_SMP)		+= bcm63xx_smp.o bcm63xx_pmb.o
+ endif
+diff --git a/arch/arm/mach-bcm/board_bcmbca.c b/arch/arm/mach-bcm/board_bcmbca.c
+index b510d959870a..1c2e3ce71a82 100644
+--- a/arch/arm/mach-bcm/board_bcmbca.c
++++ b/arch/arm/mach-bcm/board_bcmbca.c
+@@ -1,9 +1,16 @@
+ // SPDX-License-Identifier: GPL-2.0-only
+ // Copyright (C) 2024 Linus Walleij <linus.walleij@linaro.org>
+ 
++#include <linux/io.h>
++#include <linux/of.h>
++#include <linux/smp.h>
++
+ #include <asm/mach/arch.h>
+ #include <asm/mach/map.h>
++#include <asm/psci.h>
++#include <asm/smp_plat.h>
+ 
++#ifdef CONFIG_DEBUG_BCMBCA
+ /* This is needed for LL-debug/earlyprintk/debug-macro.S */
+ static struct map_desc bcmbca_io_desc[] __initdata = {
+ 	{
+@@ -13,11 +20,68 @@ static struct map_desc bcmbca_io_desc[] __initdata = {
+ 		.type = MT_DEVICE,
+ 	},
+ };
++#endif
+ 
+ static void __init bcmbca_map_io(void)
+ {
++#ifdef CONFIG_DEBUG_BCMBCA
+ 	iotable_init(bcmbca_io_desc, ARRAY_SIZE(bcmbca_io_desc));
++#endif
++}
++
++#ifdef CONFIG_SMP
++static int bcm6846_boot_secondary(unsigned int cpu, struct task_struct *idle)
++{
++	struct device_node *np;
++	void __iomem *mailbox;
++	u32 release_addr;
++	int ret;
++
++	/* CFE has already powered up CPU1 and left it waiting in WFI. */
++	if (cpu_logical_map(cpu) != 1)
++		return -EINVAL;
++
++	np = of_get_cpu_node(cpu, NULL);
++	if (!np)
++		return -ENODEV;
++
++	ret = of_property_read_u32(np, "cpu-release-addr", &release_addr);
++	of_node_put(np);
++	if (ret) {
++		pr_err("CPU%u: missing or invalid cpu-release-addr property\n", cpu);
++		return ret;
++	}
++
++	mailbox = ioremap(release_addr, sizeof(u32));
++	if (!mailbox)
++		return -ENOMEM;
++
++	/*
++	 * The CFE stub reads GPIO GeneralPurpose after an interrupt and
++	 * branches to it in ARM state. Clear any Thumb function pointer
++	 * tag and complete the MMIO write before sending the wakeup IPI.
++	 */
++	writel(__pa_symbol(secondary_startup_arm) & ~1, mailbox);
++	dsb(sy);
++	arch_send_wakeup_ipi_mask(cpumask_of(cpu));
++	iounmap(mailbox);
++
++	return 0;
++}
++
++static const struct smp_operations bcm6846_smp_ops __initconst = {
++	.smp_boot_secondary = bcm6846_boot_secondary,
++};
++
++static bool __init bcm6846_smp_init(void)
++{
++	if (!of_machine_is_compatible("genexis,xg6846b") || psci_smp_available())
++		return false;
++
++	smp_set_ops(&bcm6846_smp_ops);
++	return true;
+ }
++#endif
+ 
+ static const char * const bcmbca_dt_compat[] = {
+ 	/* TODO: Add other BCMBCA SoCs here to get debug UART support */
+@@ -27,5 +91,6 @@ static const char * const bcmbca_dt_compat[] = {
+ 
+ DT_MACHINE_START(BCMBCA_DT, "BCMBCA Broadband Access Processors")
+ 	.map_io = bcmbca_map_io,
++	.smp_init = smp_init_ops(bcm6846_smp_init),
+ 	.dt_compat = bcmbca_dt_compat,
+ MACHINE_END

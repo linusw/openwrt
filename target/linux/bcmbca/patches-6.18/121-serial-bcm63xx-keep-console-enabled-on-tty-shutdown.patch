@@ -1,0 +1,38 @@
+From: Linus Walleij <linusw@kernel.org>
+Subject: [PATCH] serial: bcm63xx: keep the console enabled on tty shutdown
+
+Closing or hanging up a tty calls bcm_uart_shutdown() even when the
+port also serves as the kernel console. Disabling the baud generator
+and transmitter there prevents subsequent console writes from reaching
+the wire, and flushing the TX FIFO can discard console output.
+
+On the XG6846B, the serial capture ends at procd's SIGTERM message and
+resumes at the boot loader. Terminal hangup when the console shell exits
+provides a possible explanation for the missing final reboot messages.
+
+Keep the console UART enabled and preserve its FIFO contents. Still mask
+interrupts and release the IRQ for both console and ordinary tty ports.
+Perform the register updates under the port lock to serialize against
+console writes.
+
+Assisted-by: Codex:GPT-6
+Signed-off-by: Linus Walleij <linusw@kernel.org>
+---
+--- a/drivers/tty/serial/bcm63xx_uart.c
++++ b/drivers/tty/serial/bcm63xx_uart.c
+@@ -455,10 +455,13 @@ static void bcm_uart_shutdown(struct uart_port *port)
+ 
+ 	uart_port_lock_irqsave(port, &flags);
+ 	bcm_uart_writel(port, 0, UART_IR_REG);
++	/* TTY hangup must not disable the kernel console. */
++	if (!uart_console(port)) {
++		bcm_uart_disable(port);
++		bcm_uart_flush(port);
++	}
+ 	uart_port_unlock_irqrestore(port, flags);
+ 
+-	bcm_uart_disable(port);
+-	bcm_uart_flush(port);
+ 	free_irq(port->irq, port);
+ }
+ 
