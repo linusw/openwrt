@@ -1,0 +1,301 @@
+From 1645435854657903c6fec5a82731b0288b09eeb7 Mon Sep 17 00:00:00 2001
+From: Linus Walleij <linusw@kernel.org>
+Date: Tue, 13 Oct 2026 11:46:35 +0200
+Subject: [PATCH] dt-bindings: net: Describe the BCMBCA XRDP Ethernet
+ controller
+
+Describe the BCMBCA XRDP Ethernet controller, initially for BCM6846.
+Require the SoC-specific compatible followed by brcm,bcmbca-xrdp-enet
+to identify the implementation and the controller family.
+
+BCM6846 has a shared XRDP register window, a coordinated reset and
+five UniMAC ports. Describe its Runner functional clock and the XRDP,
+Runner-core and WAN zone clocks provided by the PMB clock controller.
+Ports 0 through 3 connect to internal GMII PHYs; port 4 provides an
+RGMII connection to an external PHY or switch.
+
+Describe the 32 Runner queue interrupts and the separate Free Pool
+Manager interrupt, with names for the individual interrupt sources.
+
+Require the combined XRDP power domain, covering the packet processor,
+Runner cores and WAN block.
+
+Signed-off-by: Linus Walleij <linusw@kernel.org>
+
+---
+--- /dev/null
++++ b/Documentation/devicetree/bindings/net/brcm,bcmbca-xrdp-enet.yaml
+@@ -0,0 +1,273 @@
++# SPDX-License-Identifier: (GPL-2.0-only OR BSD-2-Clause)
++%YAML 1.2
++---
++$id: http://devicetree.org/schemas/net/brcm,bcmbca-xrdp-enet.yaml#
++$schema: http://devicetree.org/meta-schemas/core.yaml#
++
++title: Broadcom BCMBCA XRDP Ethernet controller
++
++maintainers:
++  - Linus Walleij <linusw@kernel.org>
++
++description:
++  Broadcom BCMBCA SoCs integrate an XRDP packet processor with shared
++  Runner cores and packet SRAM. The BCM6846 implementation connects four
++  GMII UniMACs to the integrated copper PHYs and a fifth UniMAC to an
++  external RGMII link.
++  All five ports share the Runner packet processor and its packet SRAM.
++
++properties:
++  compatible:
++    items:
++      - const: brcm,bcm6846-enet
++      - const: brcm,bcmbca-xrdp-enet
++
++  reg:
++    maxItems: 1
++
++  interrupts:
++    items:
++      - description: Runner queue 0
++      - description: Runner queue 1
++      - description: Runner queue 2
++      - description: Runner queue 3
++      - description: Runner queue 4
++      - description: Runner queue 5
++      - description: Runner queue 6
++      - description: Runner queue 7
++      - description: Runner queue 8
++      - description: Runner queue 9
++      - description: Runner queue 10
++      - description: Runner queue 11
++      - description: Runner queue 12
++      - description: Runner queue 13
++      - description: Runner queue 14
++      - description: Runner queue 15
++      - description: Runner queue 16
++      - description: Runner queue 17
++      - description: Runner queue 18
++      - description: Runner queue 19
++      - description: Runner queue 20
++      - description: Runner queue 21
++      - description: Runner queue 22
++      - description: Runner queue 23
++      - description: Runner queue 24
++      - description: Runner queue 25
++      - description: Runner queue 26
++      - description: Runner queue 27
++      - description: Runner queue 28
++      - description: Runner queue 29
++      - description: Runner queue 30
++      - description: Runner queue 31
++      - description: Free Pool Manager
++
++  interrupt-names:
++    items:
++      - const: queue0
++      - const: queue1
++      - const: queue2
++      - const: queue3
++      - const: queue4
++      - const: queue5
++      - const: queue6
++      - const: queue7
++      - const: queue8
++      - const: queue9
++      - const: queue10
++      - const: queue11
++      - const: queue12
++      - const: queue13
++      - const: queue14
++      - const: queue15
++      - const: queue16
++      - const: queue17
++      - const: queue18
++      - const: queue19
++      - const: queue20
++      - const: queue21
++      - const: queue22
++      - const: queue23
++      - const: queue24
++      - const: queue25
++      - const: queue26
++      - const: queue27
++      - const: queue28
++      - const: queue29
++      - const: queue30
++      - const: queue31
++      - const: fpm
++
++  clocks:
++    items:
++      - description: Runner functional clock
++      - description: XRDP zone 0 clock
++      - description: XRDP zone 1 clock
++      - description: XRDP zone 2 clock
++      - description: Runner core 0 zone clock
++      - description: Runner core 1 zone clock
++      - description: Runner core 2 zone clock
++      - description: WAN zone 0 clock
++      - description: WAN zone 1 clock
++      - description: WAN zone 2 clock
++
++  clock-names:
++    items:
++      - const: runner
++      - const: xrdp-zone0
++      - const: xrdp-zone1
++      - const: xrdp-zone2
++      - const: runner0
++      - const: runner1
++      - const: runner2
++      - const: wan-zone0
++      - const: wan-zone1
++      - const: wan-zone2
++
++  power-domains:
++    maxItems: 1
++    description: Combined XRDP, Runner and WAN power domain
++
++  resets:
++    maxItems: 1
++
++  ethernet-ports:
++    type: object
++    additionalProperties: false
++
++    properties:
++      '#address-cells':
++        const: 1
++      '#size-cells':
++        const: 0
++
++    patternProperties:
++      '^ethernet@[0-4]$':
++        type: object
++        $ref: ethernet-controller.yaml#
++        unevaluatedProperties: false
++
++        properties:
++          reg:
++            minimum: 0
++            maximum: 4
++            description: UniMAC port number
++
++          phy-mode:
++            enum: [gmii, rgmii, rgmii-id, rgmii-rxid, rgmii-txid]
++
++        required:
++          - reg
++          - phy-mode
++
++        allOf:
++          - if:
++              properties:
++                reg:
++                  contains:
++                    items:
++                      - maximum: 3
++            then:
++              properties:
++                phy-mode:
++                  const: gmii
++            else:
++              properties:
++                phy-mode:
++                  enum: [rgmii, rgmii-id, rgmii-rxid, rgmii-txid]
++
++    required:
++      - '#address-cells'
++      - '#size-cells'
++
++required:
++  - compatible
++  - reg
++  - interrupts
++  - interrupt-names
++  - clocks
++  - clock-names
++  - power-domains
++  - resets
++  - ethernet-ports
++
++additionalProperties: false
++
++examples:
++  - |
++    #include <dt-bindings/clock/brcm,bcm6846-pmb.h>
++    #include <dt-bindings/power/brcm,bcm6846-pmb.h>
++    #include <dt-bindings/interrupt-controller/arm-gic.h>
++    #include <dt-bindings/reset/brcm,bcm6846-pmb.h>
++
++    ethernet@82000000 {
++        compatible = "brcm,bcm6846-enet", "brcm,bcmbca-xrdp-enet";
++        reg = <0x82000000 0x1000000>;
++        interrupts = <GIC_SPI 128 IRQ_TYPE_LEVEL_HIGH>,
++                     <GIC_SPI 129 IRQ_TYPE_LEVEL_HIGH>,
++                     <GIC_SPI 130 IRQ_TYPE_LEVEL_HIGH>,
++                     <GIC_SPI 131 IRQ_TYPE_LEVEL_HIGH>,
++                     <GIC_SPI 132 IRQ_TYPE_LEVEL_HIGH>,
++                     <GIC_SPI 133 IRQ_TYPE_LEVEL_HIGH>,
++                     <GIC_SPI 134 IRQ_TYPE_LEVEL_HIGH>,
++                     <GIC_SPI 135 IRQ_TYPE_LEVEL_HIGH>,
++                     <GIC_SPI 136 IRQ_TYPE_LEVEL_HIGH>,
++                     <GIC_SPI 137 IRQ_TYPE_LEVEL_HIGH>,
++                     <GIC_SPI 138 IRQ_TYPE_LEVEL_HIGH>,
++                     <GIC_SPI 139 IRQ_TYPE_LEVEL_HIGH>,
++                     <GIC_SPI 140 IRQ_TYPE_LEVEL_HIGH>,
++                     <GIC_SPI 141 IRQ_TYPE_LEVEL_HIGH>,
++                     <GIC_SPI 142 IRQ_TYPE_LEVEL_HIGH>,
++                     <GIC_SPI 143 IRQ_TYPE_LEVEL_HIGH>,
++                     <GIC_SPI 144 IRQ_TYPE_LEVEL_HIGH>,
++                     <GIC_SPI 145 IRQ_TYPE_LEVEL_HIGH>,
++                     <GIC_SPI 146 IRQ_TYPE_LEVEL_HIGH>,
++                     <GIC_SPI 147 IRQ_TYPE_LEVEL_HIGH>,
++                     <GIC_SPI 148 IRQ_TYPE_LEVEL_HIGH>,
++                     <GIC_SPI 149 IRQ_TYPE_LEVEL_HIGH>,
++                     <GIC_SPI 150 IRQ_TYPE_LEVEL_HIGH>,
++                     <GIC_SPI 151 IRQ_TYPE_LEVEL_HIGH>,
++                     <GIC_SPI 152 IRQ_TYPE_LEVEL_HIGH>,
++                     <GIC_SPI 153 IRQ_TYPE_LEVEL_HIGH>,
++                     <GIC_SPI 154 IRQ_TYPE_LEVEL_HIGH>,
++                     <GIC_SPI 155 IRQ_TYPE_LEVEL_HIGH>,
++                     <GIC_SPI 156 IRQ_TYPE_LEVEL_HIGH>,
++                     <GIC_SPI 157 IRQ_TYPE_LEVEL_HIGH>,
++                     <GIC_SPI 158 IRQ_TYPE_LEVEL_HIGH>,
++                     <GIC_SPI 159 IRQ_TYPE_LEVEL_HIGH>,
++                     <GIC_SPI 160 IRQ_TYPE_LEVEL_HIGH>;
++        interrupt-names = "queue0", "queue1", "queue2", "queue3",
++                          "queue4", "queue5", "queue6", "queue7",
++                          "queue8", "queue9", "queue10", "queue11",
++                          "queue12", "queue13", "queue14", "queue15",
++                          "queue16", "queue17", "queue18", "queue19",
++                          "queue20", "queue21", "queue22", "queue23",
++                          "queue24", "queue25", "queue26", "queue27",
++                          "queue28", "queue29", "queue30", "queue31",
++                          "fpm";
++        clocks = <&pmb_clk BCM6846_CLK_RUNNER>,
++                 <&pmb_clk BCM6846_CLK_XRDP_ZONE0>,
++                 <&pmb_clk BCM6846_CLK_XRDP_ZONE1>,
++                 <&pmb_clk BCM6846_CLK_XRDP_ZONE2>,
++                 <&pmb_clk BCM6846_CLK_RUNNER0>,
++                 <&pmb_clk BCM6846_CLK_RUNNER1>,
++                 <&pmb_clk BCM6846_CLK_RUNNER2>,
++                 <&pmb_clk BCM6846_CLK_WAN_ZONE0>,
++                 <&pmb_clk BCM6846_CLK_WAN_ZONE1>,
++                 <&pmb_clk BCM6846_CLK_WAN_ZONE2>;
++        clock-names = "runner", "xrdp-zone0", "xrdp-zone1", "xrdp-zone2",
++                      "runner0", "runner1", "runner2",
++                      "wan-zone0", "wan-zone1", "wan-zone2";
++        power-domains = <&pmb_power BCM6846_PD_XRDP>;
++        resets = <&pmb_reset BCM6846_RESET_XRDP>;
++
++        ethernet-ports {
++            #address-cells = <1>;
++            #size-cells = <0>;
++
++            ethernet@0 {
++                reg = <0>;
++                phy-mode = "gmii";
++                phy-handle = <&phy1>;
++            };
++        };
++    };

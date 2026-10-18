@@ -1,0 +1,22 @@
+From 118259a450286fd7ec875a5a800dab14221ea96a Mon Sep 17 00:00:00 2001
+From: Linus Walleij <linusw@kernel.org>
+Date: Fri, 6 Nov 2026 00:44:02 +0100
+Subject: [PATCH] dt-bindings: spi: brcm,bcm63xx-hsspi: Add power-domains
+
+The BCM6846 HSSPI controller is powered by the PMB peripheral
+domain. Allow one optional power domain so the SoC device tree can
+describe this dependency.
+
+---
+--- a/Documentation/devicetree/bindings/spi/brcm,bcm63xx-hsspi.yaml
++++ b/Documentation/devicetree/bindings/spi/brcm,bcm63xx-hsspi.yaml
+@@ -57,6 +57,9 @@ properties:
+               - brcm,bcm6855-hsspi
+           - const: brcm,bcmbca-hsspi-v1.1
+ 
++  power-domains:
++    maxItems: 1
++
+   reg:
+     items:
+       - description: main registers

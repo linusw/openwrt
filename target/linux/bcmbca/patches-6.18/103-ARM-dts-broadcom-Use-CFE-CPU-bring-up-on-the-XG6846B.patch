@@ -1,0 +1,59 @@
+From 5d066435efd2656b069a0278097c752a678bb7bb Mon Sep 17 00:00:00 2001
+From: Linus Walleij <linusw@kernel.org>
+Date: Mon, 12 Oct 2026 00:24:49 +0200
+Subject: [PATCH] ARM: dts: broadcom: Use CFE CPU bring-up on the XG6846B
+
+The XG6846B boots through CFE, which parks CPU1 in a holding pen and does
+not provide PSCI. Starting Linux from CFE does not install a PSCI
+implementation either. The working PSCI interface in newer GenXOS
+firmware belongs to a different boot stack.
+
+Disable the inherited PSCI node on this board so Linux does not issue
+SMCs to an interface that is absent. Set the CPUs' enable-method to
+brcm,bca-smp to select the BCMBCA CFE SMP operations. Describe the CFE
+mailbox in CPU1's cpu-release-addr property. Set CPU0's required release
+address to zero since it is already online. Keep both CPU nodes enabled
+and leave the SoC's PSCI defaults available to other boards.
+
+Also remove no-map from the secondary-boot reservation. Its overlap
+with ARM's initial page tables otherwise causes the reservation to be
+rejected, leaving CFE's holding pen unprotected.
+
+Reviewed-by: William Zhang <william.zhang@broadcom.com>
+Signed-off-by: Linus Walleij <linusw@kernel.org>
+
+---
+--- a/arch/arm/boot/dts/broadcom/bcm6846-genexis-xg6846b.dts
++++ b/arch/arm/boot/dts/broadcom/bcm6846-genexis-xg6846b.dts
+@@ -34,7 +34,7 @@
+ 		ranges;
+ 
+ 		secondary-boot@0 {
+-			no-map;
++			/* Includes the kernel's initial page tables. */
+ 			reg = <0x00000000 0x00008000>;
+ 		};
+ 		pmc3-firmware@8000 {
+@@ -56,6 +56,22 @@
+ 	};
+ };
+ 
++/* CFE parks CPU1 in its holding pen and does not provide PSCI. */
++&{/psci} {
++	status = "disabled";
++};
++
++&CA7_0 {
++	enable-method = "brcm,bca-smp";
++	/* Dummy release address since CPU0 is already online */
++	cpu-release-addr = <0x00000000>;
++};
++
++&CA7_1 {
++	enable-method = "brcm,bca-smp";
++	cpu-release-addr = <0xff800568>;
++};
++
+ &gpio0 {
+ 	status = "okay";
+ };

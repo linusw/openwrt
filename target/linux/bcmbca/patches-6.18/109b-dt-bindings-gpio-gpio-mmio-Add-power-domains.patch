@@ -1,0 +1,22 @@
+From 80c1678770b8615879458064a02ddaa39fe3f140 Mon Sep 17 00:00:00 2001
+From: Linus Walleij <linusw@kernel.org>
+Date: Fri, 6 Nov 2026 00:44:01 +0100
+Subject: [PATCH] dt-bindings: gpio: gpio-mmio: Add power-domains
+
+The BCM6846 GPIO controllers are powered by the PMB peripheral
+domain. Allow one optional power domain so the SoC device tree can
+describe this dependency.
+
+---
+--- a/Documentation/devicetree/bindings/gpio/gpio-mmio.yaml
++++ b/Documentation/devicetree/bindings/gpio/gpio-mmio.yaml
+@@ -33,6 +33,9 @@ properties:
+ 
+   little-endian: true
+ 
++  power-domains:
++    maxItems: 1
++
+   reg:
+     minItems: 1
+     description:

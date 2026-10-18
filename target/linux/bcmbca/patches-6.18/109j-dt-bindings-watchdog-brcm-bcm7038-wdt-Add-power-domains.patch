@@ -1,0 +1,22 @@
+From 40ba2dbe58aa9b083f22bddcc84d3f463069b7be Mon Sep 17 00:00:00 2001
+From: Linus Walleij <linusw@kernel.org>
+Date: Fri, 6 Nov 2026 00:44:02 +0100
+Subject: [PATCH] dt-bindings: watchdog: brcm,bcm7038-wdt: Add power-domains
+
+The BCM6846 watchdog controller is powered by the PMB peripheral
+domain. Allow one optional power domain so the SoC device tree can
+describe this dependency.
+
+---
+--- a/Documentation/devicetree/bindings/watchdog/brcm,bcm7038-wdt.yaml
++++ b/Documentation/devicetree/bindings/watchdog/brcm,bcm7038-wdt.yaml
+@@ -20,6 +20,9 @@ properties:
+       - brcm,bcm6345-wdt
+       - brcm,bcm7038-wdt
+ 
++  power-domains:
++    maxItems: 1
++
+   reg:
+     maxItems: 1
+ 

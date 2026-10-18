@@ -1,0 +1,22 @@
+From b572a68d944a0d7a04038cfe2957051f601aa6ee Mon Sep 17 00:00:00 2001
+From: Linus Walleij <linusw@kernel.org>
+Date: Fri, 6 Nov 2026 00:44:01 +0100
+Subject: [PATCH] dt-bindings: net: brcm,unimac-mdio: Add power-domains
+
+The BCM6846 MDIO controller is powered by the PMB peripheral
+domain. Allow one optional power domain so the SoC device tree can
+describe this dependency.
+
+---
+--- a/Documentation/devicetree/bindings/net/brcm,unimac-mdio.yaml
++++ b/Documentation/devicetree/bindings/net/brcm,unimac-mdio.yaml
+@@ -28,6 +28,9 @@ properties:
+       - brcm,unimac-mdio
+       - brcm,bcm6846-mdio
+ 
++  power-domains:
++    maxItems: 1
++
+   reg:
+     minItems: 1
+     items:

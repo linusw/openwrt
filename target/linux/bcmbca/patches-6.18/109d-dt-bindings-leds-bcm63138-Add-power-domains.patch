@@ -1,0 +1,22 @@
+From 2ddb69e1d41b8407f92fa35f550edcccc8bc414e Mon Sep 17 00:00:00 2001
+From: Linus Walleij <linusw@kernel.org>
+Date: Fri, 6 Nov 2026 00:44:01 +0100
+Subject: [PATCH] dt-bindings: leds: bcm63138: Add power-domains
+
+The BCM6846 LED controller is powered by the PMB peripheral
+domain. Allow one optional power domain so the SoC device tree can
+describe this dependency.
+
+---
+--- a/Documentation/devicetree/bindings/leds/leds-bcm63138.yaml
++++ b/Documentation/devicetree/bindings/leds/leds-bcm63138.yaml
+@@ -32,6 +32,9 @@ properties:
+           - const: brcm,bcm63138-leds
+       - const: brcm,bcm63138-leds
+ 
++  power-domains:
++    maxItems: 1
++
+   reg:
+     maxItems: 1
+ 

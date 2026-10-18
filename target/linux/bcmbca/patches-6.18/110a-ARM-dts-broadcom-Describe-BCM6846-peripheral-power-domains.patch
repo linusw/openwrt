@@ -1,0 +1,151 @@
+From 9cf75beea0f76df008fb627c1b03b77eeac50232 Mon Sep 17 00:00:00 2001
+From: Linus Walleij <linusw@kernel.org>
+Date: Fri, 6 Nov 2026 00:28:42 +0100
+Subject: [PATCH] ARM: dts: broadcom: Describe BCM6846 peripheral power domains
+
+Connect the watchdog, GPIO banks, UART, RNG, LED controller, HSSPI,
+NAND, MDIO, I2C and PL081 DMA to the shared PMB peripheral power domain.
+The provider keeps this domain always on.
+
+Describe the dependency on each peripheral rather than the enclosing
+simple-bus, which also contains the PMC/PMB power-domain provider.
+
+---
+--- a/arch/arm/boot/dts/broadcom/bcm6846.dtsi
++++ b/arch/arm/boot/dts/broadcom/bcm6846.dtsi
+@@ -119,6 +119,7 @@
+ 		watchdog@480 {
+ 			compatible = "brcm,bcm6345-wdt";
+ 			reg = <0x480 0x10>;
++			power-domains = <&pmb_power BCM6846_PD_PERIPH>;
+ 		};
+ 
+ 		/* GPIOs 0 .. 31 */
+@@ -128,6 +129,7 @@
+ 			reg-names = "dirout", "dat";
+ 			gpio-controller;
+ 			#gpio-cells = <2>;
++			power-domains = <&pmb_power BCM6846_PD_PERIPH>;
+ 			status = "disabled";
+ 		};
+ 
+@@ -138,6 +140,7 @@
+ 			reg-names = "dirout", "dat";
+ 			gpio-controller;
+ 			#gpio-cells = <2>;
++			power-domains = <&pmb_power BCM6846_PD_PERIPH>;
+ 			status = "disabled";
+ 		};
+ 
+@@ -148,6 +151,7 @@
+ 			reg-names = "dirout", "dat";
+ 			gpio-controller;
+ 			#gpio-cells = <2>;
++			power-domains = <&pmb_power BCM6846_PD_PERIPH>;
+ 			status = "disabled";
+ 		};
+ 
+@@ -158,6 +162,7 @@
+ 			reg-names = "dirout", "dat";
+ 			gpio-controller;
+ 			#gpio-cells = <2>;
++			power-domains = <&pmb_power BCM6846_PD_PERIPH>;
+ 			status = "disabled";
+ 		};
+ 
+@@ -168,6 +173,7 @@
+ 			reg-names = "dirout", "dat";
+ 			gpio-controller;
+ 			#gpio-cells = <2>;
++			power-domains = <&pmb_power BCM6846_PD_PERIPH>;
+ 			status = "disabled";
+ 		};
+ 
+@@ -178,6 +184,7 @@
+ 			reg-names = "dirout", "dat";
+ 			gpio-controller;
+ 			#gpio-cells = <2>;
++			power-domains = <&pmb_power BCM6846_PD_PERIPH>;
+ 			status = "disabled";
+ 		};
+ 
+@@ -188,6 +195,7 @@
+ 			reg-names = "dirout", "dat";
+ 			gpio-controller;
+ 			#gpio-cells = <2>;
++			power-domains = <&pmb_power BCM6846_PD_PERIPH>;
+ 			status = "disabled";
+ 		};
+ 
+@@ -198,6 +206,7 @@
+ 			reg-names = "dirout", "dat";
+ 			gpio-controller;
+ 			#gpio-cells = <2>;
++			power-domains = <&pmb_power BCM6846_PD_PERIPH>;
+ 			status = "disabled";
+ 		};
+ 
+@@ -207,6 +216,7 @@
+ 			interrupts = <GIC_SPI 92 IRQ_TYPE_LEVEL_HIGH>;
+ 			clocks = <&periph_clk>;
+ 			clock-names = "refclk";
++			power-domains = <&pmb_power BCM6846_PD_PERIPH>;
+ 			status = "disabled";
+ 		};
+ 
+@@ -214,6 +224,7 @@
+ 			compatible = "brcm,iproc-rng200";
+ 			reg = <0xb80 0x28>;
+ 			interrupts = <GIC_SPI 85 IRQ_TYPE_LEVEL_HIGH>;
++			power-domains = <&pmb_power BCM6846_PD_PERIPH>;
+ 		};
+ 
+ 		leds: led-controller@800 {
+@@ -221,6 +232,7 @@
+ 			#size-cells = <0>;
+ 			compatible = "brcm,bcm63138-leds";
+ 			reg = <0x800 0xdc>;
++			power-domains = <&pmb_power BCM6846_PD_PERIPH>;
+ 			status = "disabled";
+ 		};
+ 
+@@ -233,6 +245,7 @@
+ 			clocks = <&hsspi_pll &hsspi_pll>;
+ 			clock-names = "hsspi", "pll";
+ 			num-cs = <8>;
++			power-domains = <&pmb_power BCM6846_PD_PERIPH>;
+ 			status = "disabled";
+ 		};
+ 
+@@ -242,6 +255,7 @@
+ 			compatible = "brcm,nand-bcm63138", "brcm,brcmnand-v7.1", "brcm,brcmnand";
+ 			reg = <0x1800 0x600>, <0x2000 0x10>;
+ 			reg-names = "nand", "nand-int-base";
++			power-domains = <&pmb_power BCM6846_PD_PERIPH>;
+ 			status = "disabled";
+ 
+ 			nandcs: nand@0 {
+@@ -256,6 +270,7 @@
+ 			reg-names = "mdio", "mdio_indir_rw";
+ 			#address-cells = <1>;
+ 			#size-cells = <0>;
++			power-domains = <&pmb_power BCM6846_PD_PERIPH>;
+ 			status = "disabled";
+ 		};
+ 
+@@ -265,6 +280,7 @@
+ 			interrupts = <GIC_SPI 83 IRQ_TYPE_LEVEL_HIGH>;
+ 			#address-cells = <1>;
+ 			#size-cells = <0>;
++			power-domains = <&pmb_power BCM6846_PD_PERIPH>;
+ 			status = "disabled";
+ 		};
+ 
+@@ -279,6 +295,7 @@
+ 			clocks = <&periph_clk>;
+ 			clock-names = "apb_pclk";
+ 			#dma-cells = <2>;
++			power-domains = <&pmb_power BCM6846_PD_PERIPH>;
+ 		};
+ 
+ 		pmc: system-controller@300000 {

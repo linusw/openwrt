@@ -1,0 +1,17 @@
+#!/bin/sh
+# SPDX-License-Identifier: GPL-2.0-only
+
+. /lib/functions.sh
+. /lib/functions/uci-defaults.sh
+
+board_config_update
+
+case "$(board_name)" in
+genexis,xg6846b)
+	ucidef_set_interfaces_lan_wan "eth0 eth1 eth2 eth3" "eth4 sfp"
+	ucidef_set_label_macaddr "$(cat /sys/class/net/eth0/address)"
+	;;
+esac
+
+board_config_flush
+exit 0

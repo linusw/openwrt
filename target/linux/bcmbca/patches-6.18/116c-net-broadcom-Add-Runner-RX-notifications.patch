@@ -1,0 +1,694 @@
+From d8d37290281c5a016f29d820832f114c27122c7f Mon Sep 17 00:00:00 2001
+From: Linus Walleij <linusw@kernel.org>
+Date: Thu, 29 Oct 2026 08:21:54 +0100
+Subject: [PATCH] net: broadcom: Add RX notifications to the reduced BCM6846
+ Runner
+
+Add a queue-0 notification after publishing an SRAM RX descriptor. Keep
+all original task entry points and the SBPM packet interface, moving
+three counter instructions into the notification routine. Preserve the
+RX registers and retain the DMA source mask until reset.
+
+Reuse the external-write encoding from the BCM6846 PON interrupt
+coalescing routine. Supply its destination through a Runner SRAM mailbox
+and expose an issued-notification counter. Enable IRQ-driven receive by
+default when all queue interrupts are available, with polling fallback
+for older device trees. The shared rx-irq ethtool private flag allows
+switching between modes.
+
+Mask and acknowledge notifications before draining the FIFO, then unmask
+after NAPI completion without clearing new arrivals. Retain RX ownership
+across full budgets and deferred repolls. Use NAPI software IRQ coalescing
+to batch follow-up packets, with a shared ethtool rx-usecs setting of
+0..1000 microseconds, defaulting to zero. The first IRQ schedules NAPI
+immediately and one empty repoll ends deferral. Mode changes invalidate
+old completion state. TX timers cannot start a new RX batch and stop
+when no TX work remains. Refuse synthetic IRQ tests in IRQ receive mode.
+
+Extend assembler tests to check the vendor write encoding, the displaced
+instructions and preservation of the original image outside the hook.
+Document the mailbox, inferred instruction semantics and qualification
+criteria.
+
+Signed-off-by: Linus Walleij <linusw@kernel.org>
+
+---
+--- a/drivers/net/ethernet/broadcom/Kconfig
++++ b/drivers/net/ethernet/broadcom/Kconfig
+@@ -81,7 +81,8 @@ config BCMBCA_XRDP_ETH
+ 	help
+ 	  Ethernet support for the BCMBCA XRDP packet engine using Broadcom's
+ 	  reduced Runner program and on-chip packet SRAM. Currently supports
+-	  BCM6846. Packet transfers use polling.
++	  BCM6846. Receive uses queue interrupts when available, with a polling
++	  fallback. Transmit completion is polled.
+ 	  Firmware must have configured pin multiplexing and external PHYs
+ 	  before Linux starts.
+ 
+--- a/drivers/net/ethernet/broadcom/bcm6846_runner.rnr
++++ b/drivers/net/ethernet/broadcom/bcm6846_runner.rnr
+@@ -22,6 +22,11 @@
+ .const JMP_INIT_EXIT = 0x1004
+ .const JMP_RECYCLE = 0x1000
+ .const JMP_TASK = 0x1c00
++.const RX_IRQ_ENABLE = 0x380
++.const RX_IRQ_MASK = 0x384
++.const RX_IRQ_ADDRESS = 0x388
++.const RX_IRQ_COUNT = 0x390
++.const RX_IRQ_SAVE = 0x3a0
+ 
+ .assert_pc 0x0000
+ reset_vector:
+@@ -201,9 +206,10 @@ cpu_rx:
+ 	alu.add r13, r13, 4, 0, 0, 0
+ 	store r13, r8, 0x0, MEM32
+ 	load r13, r8, 0x2, MEM_EXT32
+-	alu.add r12, r13, 12, 0, 0, 0
+-	alu.add r12, r12, 4, 0, 0, 1
+-	store r12, r8, 0x2, MEM_EXT32
++	.assert_pc 0x23c
++	jump rx_notify, JMP_VECTOR
++	nop
++	nop
+ 
+ .assert_pc 0x0248
+ rx_recycle:
+@@ -275,5 +281,43 @@ cpu_tx:
+ 
+ .assert_pc 0x334
+ 
++# Finish the displaced counter update after publishing the RX descriptor.
++# Keep the original task entry points and recycle path at their ABI PCs.
++rx_notify:
++	alu.add r12, r13, 12, 0, 0, 0
++	alu.add r12, r12, 4, 0, 0, 1
++	store r12, r8, 0x2, MEM_EXT32
++	st32.abs r8, RX_IRQ_SAVE
++	st32.abs r14, RX_IRQ_SAVE + 4
++	st64.abs r18, RX_IRQ_SAVE + 8
++	ld32.abs r8, RX_IRQ_ENABLE
++	nop
++	nop
++	alu.sub r0, r8, 0, 8, 0, 0
++	jump rx_notify_done, JMP_INIT_EXIT
++	movi r14, RX_IRQ_MASK
++	ld64.abs r18, RX_IRQ_ADDRESS
++	nop
++	nop
++# Store a mask, then send four bytes
++# to the host-supplied queue ITR address. Keep its original control fields.
++# The mask remains in SRAM until reset, including after disabling IRQ RX.
++	store r8, r14, 0, MEM32
++	write.ext r14, r18, 4, 8, 0, 1
++	nop
++	nop
++	ld32.abs r8, RX_IRQ_COUNT
++	nop
++	nop
++	alu.add r8, r8, 4, 0, 0, 0
++	st32.abs r8, RX_IRQ_COUNT
++rx_notify_done:
++	ld32.abs r8, RX_IRQ_SAVE
++	ld32.abs r14, RX_IRQ_SAVE + 4
++	ld64.abs r18, RX_IRQ_SAVE + 8
++	jump rx_recycle, JMP_VECTOR
++	nop
++	nop
++
+ # Fill the rest of the 32 KiB instruction RAM with the documented NOP.
+ .pad 0x8000
+--- a/drivers/net/ethernet/broadcom/bcmbca_runner.c
++++ b/drivers/net/ethernet/broadcom/bcmbca_runner.c
+@@ -21,6 +21,9 @@
+ #define RUNNER_ENABLE		BIT(0)
+ #define RUNNER_WAKEUP		0x4
+ #define CPU_TX_THREAD		1
++#define RX_IRQ_ENABLE		0x0
++#define RX_IRQ_ADDRESS		0x8
++#define RX_IRQ_COUNT		0x10
+ 
+ void bcmbca_runner_stop(struct bcmbca_runner *runner)
+ {
+@@ -107,3 +110,29 @@ u8 bcmbca_runner_reduced_tx_counter(stru
+ {
+ 	return readb(runner->base + runner->data->sram + offset);
+ }
++
++static void __iomem *bcmbca_runner_reduced_irq_mailbox(struct bcmbca_runner *runner)
++{
++	return runner->base + runner->data->sram + runner->reduced->rx_irq_mailbox;
++}
++
++void bcmbca_runner_reduced_irq_address(struct bcmbca_runner *runner, phys_addr_t addr)
++{
++	void __iomem *mailbox = bcmbca_runner_reduced_irq_mailbox(runner);
++
++	/* Write the low address word before the high address word. */
++	iowrite32be(lower_32_bits(addr), mailbox + RX_IRQ_ADDRESS);
++	iowrite32be(upper_32_bits(addr), mailbox + RX_IRQ_ADDRESS + 4);
++}
++
++void bcmbca_runner_reduced_irq_enable(struct bcmbca_runner *runner, u32 mask)
++{
++	iowrite32be(mask, bcmbca_runner_reduced_irq_mailbox(runner) + RX_IRQ_ENABLE);
++}
++
++u32 bcmbca_runner_reduced_irq_count(struct bcmbca_runner *runner)
++{
++	if (!runner->reduced->rx_irq_mailbox)
++		return 0;
++	return ioread32be(bcmbca_runner_reduced_irq_mailbox(runner) + RX_IRQ_COUNT);
++}
+--- a/drivers/net/ethernet/broadcom/bcmbca_runner.h
++++ b/drivers/net/ethernet/broadcom/bcmbca_runner.h
+@@ -20,6 +20,8 @@ struct bcmbca_runner_reduced_data {
+ 	u32 tx_descriptor;
+ 	u32 tx_destination;
+ 	unsigned int rx_fifo_size;
++	/* Zero for programs without packet notifications. */
++	u32 rx_irq_mailbox;
+ };
+ 
+ /* The caller owns the XRDP mapping, clocks, reset and access serialization. */
+@@ -43,6 +45,9 @@ void bcmbca_runner_reduced_transmit(stru
+ 				    unsigned int len, u16 destination);
+ u16 bcmbca_runner_reduced_tx_length(struct bcmbca_runner *runner);
+ u8 bcmbca_runner_reduced_tx_counter(struct bcmbca_runner *runner, u16 offset);
++void bcmbca_runner_reduced_irq_address(struct bcmbca_runner *runner, phys_addr_t addr);
++void bcmbca_runner_reduced_irq_enable(struct bcmbca_runner *runner, u32 mask);
++u32 bcmbca_runner_reduced_irq_count(struct bcmbca_runner *runner);
+ 
+ static inline u16 bcmbca_runner_reduced_tx_length_word(unsigned int buffers,
+ 						       unsigned int len)
+--- a/drivers/net/ethernet/broadcom/bcmbca_xrdp.c
++++ b/drivers/net/ethernet/broadcom/bcmbca_xrdp.c
+@@ -50,6 +50,7 @@
+ #define QUEUE_ISM		0x4
+ #define QUEUE_IER		0x8
+ #define QUEUE_ITR		0xc
++#define RX_QUEUE_IRQ		BIT(0)
+ #define MIB_RX_PAUSE		0x40
+ #define MIB_TX_PAUSE		0xb4
+ #define MIB_CONTROL		0x180
+@@ -123,6 +124,7 @@ static const struct bcmbca_xrdp_enet_var
+ 		.tx_descriptor = 0x50,
+ 		.tx_destination = 0xdc,
+ 		.rx_fifo_size = 64,
++		.rx_irq_mailbox = 0x380,
+ 	},
+ 	.init_data = bcm6846_init_data,
+ 	.init_data_size = ARRAY_SIZE(bcm6846_init_data),
+@@ -182,6 +184,13 @@ struct bcmbca_xrdp_enet {
+ 	u64 irq_test_events;
+ 	atomic_t timer_runs;
+ 	bool irq_ready;
++	/* Protected by irq_lock; writers of rx_irq also hold lock. */
++	bool rx_irq;
++	bool rx_active;
++	u32 rx_generation;
++	u32 rx_coalesce_usecs;
++	u64 rx_irq_polls;
++	u64 rx_polling_polls;
+ 	u64 sbpm_timeouts;
+ 	u64 sbpm_alloc_failures;
+ 	u64 rx_invalid_descriptors;
+@@ -199,6 +208,12 @@ static void __iomem *bcmbca_xrdp_irq_bas
+ 	return enet->base + enet->variant->queue_intr;
+ }
+ 
++/* Caller holds irq_lock. Tests and packet notifications never run together. */
++static u32 bcmbca_xrdp_irq_mask(struct bcmbca_xrdp_enet *enet)
++{
++	return enet->irq_test_bit | (enet->rx_irq ? RX_QUEUE_IRQ : 0);
++}
++
+ static irqreturn_t bcmbca_xrdp_irq(int irq, void *data)
+ {
+ 	struct bcmbca_xrdp_enet *enet = data;
+@@ -234,10 +249,14 @@ static irqreturn_t bcmbca_xrdp_irq(int i
+ 	pending &= ~enet->irq_test_bit;
+ 	if (pending) {
+ 		writel(enet->irq_test_bit, base + QUEUE_IER);
++		/* Clear ITR too: CPU-originated writes produce a level interrupt. */
++		writel(0, base + QUEUE_ITR);
+ 		writel(pending, base + QUEUE_ISR);
+ 		readl(base + QUEUE_IER);
+ 		enet->irq_events++;
+ 		enet->irq_seen |= pending;
++		enet->rx_generation++;
++		enet->rx_active = true;
+ 		schedule = true;
+ 	}
+ out:
+@@ -255,6 +274,8 @@ static void bcmbca_xrdp_irq_stop(struct
+ 	spin_lock_irqsave(&enet->irq_lock, flags);
+ 	enet->irq_ready = false;
+ 	if (enet->hw_accessible) {
++		if (enet->variant->reduced.rx_irq_mailbox)
++			bcmbca_runner_reduced_irq_enable(&enet->runner, 0);
+ 		writel(0, bcmbca_xrdp_irq_base(enet) + QUEUE_IER);
+ 		writel(0, bcmbca_xrdp_irq_base(enet) + QUEUE_ITR);
+ 		readl(bcmbca_xrdp_irq_base(enet) + QUEUE_IER);
+@@ -678,6 +699,8 @@ static int bcmbca_xrdp_poll(struct napi_
+ 	struct sk_buff *skb;
+ 	unsigned long flags;
+ 	unsigned int i, tx_work;
++	u32 rx_generation = 0;
++	bool receive, tx_pending = false;
+ 	int work_done = 0;
+ 
+ 	__skb_queue_head_init(&rx_queue);
+@@ -686,14 +709,24 @@ static int bcmbca_xrdp_poll(struct napi_
+ 	if (enet->stopping || enet->faulted)
+ 		goto out;
+ 	spin_lock_irqsave(&enet->irq_lock, flags);
+-	if (enet->irq_ready) {
++	receive = !enet->rx_irq || enet->rx_active;
++	rx_generation = enet->rx_generation;
++	if (budget && receive && enet->irq_ready) {
+ 		writel(enet->irq_test_bit, bcmbca_xrdp_irq_base(enet) + QUEUE_IER);
+ 		/* Clear old notifications before draining the SRAM FIFO. */
++		if (enet->rx_irq)
++			writel(0, bcmbca_xrdp_irq_base(enet) + QUEUE_ITR);
+ 		writel(~enet->irq_test_bit, bcmbca_xrdp_irq_base(enet) + QUEUE_ISR);
+ 	}
+ 	spin_unlock_irqrestore(&enet->irq_lock, flags);
+ 	enet->poll_runs++;
+-	for (; work_done < budget && !enet->faulted; work_done++)
++	if (budget && receive) {
++		if (enet->rx_irq)
++			enet->rx_irq_polls++;
++		else
++			enet->rx_polling_polls++;
++	}
++	for (; receive && work_done < budget && !enet->faulted; work_done++)
+ 		if (!bcmbca_xrdp_receive(enet, &rx_queue))
+ 			break;
+ 	if (budget && work_done == budget)
+@@ -732,6 +765,8 @@ static int bcmbca_xrdp_poll(struct napi_
+ 			dev_consume_skb_any(skb);
+ 		}
+ 		netdev_completed_queue(port->ndev, packets, bytes);
++		tx_pending |= !skb_queue_empty(&port->tx_queue) ||
++			      port->tx_ring.producer != port->tx_ring.consumer;
+ 		if (skb_queue_len(&port->tx_queue) < TX_QUEUE_LEN / 2)
+ 			netif_wake_queue(port->ndev);
+ 	}
+@@ -744,7 +779,7 @@ static int bcmbca_xrdp_poll(struct napi_
+ 		for (i = 0; i < variant->num_ports; i++)
+ 			if (enet->ports[i])
+ 				netif_stop_queue(enet->ports[i]->ndev);
+-	} else if (budget && work_done < budget) {
++	} else if (budget && work_done < budget && (!enet->rx_irq || tx_pending)) {
+ 		/* Arm before releasing NAPI ownership, while remove is excluded. */
+ 		hrtimer_start(&enet->poll_timer, ns_to_ktime(POLL_INTERVAL_US * NSEC_PER_USEC),
+ 			      HRTIMER_MODE_REL);
+@@ -757,8 +792,12 @@ out:
+ 	/* Completion can flush GRO and transmit replies, too. */
+ 	if (budget && work_done < budget && napi_complete_done(napi, work_done)) {
+ 		spin_lock_irqsave(&enet->irq_lock, flags);
+-		if (enet->irq_ready) {
+-			writel(U32_MAX, bcmbca_xrdp_irq_base(enet) + QUEUE_IER);
++		if (enet->irq_ready && rx_generation == enet->rx_generation) {
++			/* Keep RX active across NAPI's bounded, deferred repolls. */
++			enet->rx_active = false;
++			/* Do not acknowledge here: arrivals during the drain stay pending. */
++			writel(bcmbca_xrdp_irq_mask(enet),
++			       bcmbca_xrdp_irq_base(enet) + QUEUE_IER);
+ 			readl(bcmbca_xrdp_irq_base(enet) + QUEUE_IER);
+ 		}
+ 		spin_unlock_irqrestore(&enet->irq_lock, flags);
+@@ -848,6 +887,8 @@ static int bcmbca_xrdp_open(struct net_d
+ 	spin_unlock_bh(&enet->lock);
+ 	phylink_start(port->phylink);
+ 	netif_start_queue(ndev);
++	/* Resume completion service for credits left over from a close. */
++	napi_schedule(&enet->napi);
+ 	return 0;
+ }
+ 
+@@ -996,6 +1037,15 @@ static void bcmbca_xrdp_self_test(struct
+ 
+ 	/* Exercise the routing, independently of Runner packet notifications. */
+ 	mutex_lock(&enet->irq_test_lock);
++	spin_lock_irqsave(&enet->irq_lock, flags);
++	if (enet->rx_irq) {
++		spin_unlock_irqrestore(&enet->irq_lock, flags);
++		mutex_unlock(&enet->irq_test_lock);
++		data[0] = U32_MAX;
++		test->flags |= ETH_TEST_FL_FAILED;
++		return;
++	}
++	spin_unlock_irqrestore(&enet->irq_lock, flags);
+ 	for (i = 0; i < QUEUE_IRQ_COUNT; i++) {
+ 		spin_lock_irqsave(&enet->irq_lock, flags);
+ 		if (!enet->irq_ready) {
+@@ -1019,6 +1069,7 @@ static void bcmbca_xrdp_self_test(struct
+ 			readl(base + QUEUE_ISR);
+ 		}
+ 		enet->irq_test_bit = 0;
++		writel(0, base + QUEUE_IER);
+ 		spin_unlock_irqrestore(&enet->irq_lock, flags);
+ 		if (!delivered)
+ 			failed |= BIT(i);
+@@ -1084,12 +1135,115 @@ static const char bcmbca_xrdp_sw_stats[]
+ 	"shared_poll_timer_runs",
+ 	"queue_irq_status",
+ 	"queue_irq_enable",
++	"rx_irq_mode",
++	"shared_rx_irq_polls",
++	"shared_rx_polling_polls",
++	"shared_runner_notifications",
++};
++
++static const char bcmbca_xrdp_priv_flags[][ETH_GSTRING_LEN] = {
++	"rx-irq",
+ };
+ 
++static u32 bcmbca_xrdp_get_priv_flags(struct net_device *ndev)
++{
++	struct bcmbca_xrdp_port *port = netdev_priv(ndev);
++
++	return READ_ONCE(port->enet->rx_irq);
++}
++
++/*
++ * The dummy netdevice owns the NAPI instance shared by all ports. Defer
++ * rearming for one empty poll, then leave RX asleep until the next IRQ.
++ */
++static void bcmbca_xrdp_set_irq_coalesce(struct bcmbca_xrdp_enet *enet)
++{
++	u32 usecs = enet->rx_irq ? enet->rx_coalesce_usecs : 0;
++
++	/* These settings are read locklessly by the NAPI core. */
++	WRITE_ONCE(enet->napi.gro_flush_timeout, usecs * NSEC_PER_USEC);
++	WRITE_ONCE(enet->napi.defer_hard_irqs, usecs ? 1 : 0);
++}
++
++static int bcmbca_xrdp_get_coalesce(struct net_device *ndev,
++				    struct ethtool_coalesce *ec,
++				    struct kernel_ethtool_coalesce *kernel_ec,
++				    struct netlink_ext_ack *extack)
++{
++	struct bcmbca_xrdp_port *port = netdev_priv(ndev);
++
++	ec->rx_coalesce_usecs = READ_ONCE(port->enet->rx_coalesce_usecs);
++	return 0;
++}
++
++static int bcmbca_xrdp_set_coalesce(struct net_device *ndev,
++				    struct ethtool_coalesce *ec,
++				    struct kernel_ethtool_coalesce *kernel_ec,
++				    struct netlink_ext_ack *extack)
++{
++	struct bcmbca_xrdp_port *port = netdev_priv(ndev);
++	struct bcmbca_xrdp_enet *enet = port->enet;
++
++	if (!enet->variant->reduced.rx_irq_mailbox || enet->num_irqs != QUEUE_IRQ_COUNT)
++		return -EOPNOTSUPP;
++	if (ec->rx_coalesce_usecs > POLL_INTERVAL_US)
++		return -EINVAL;
++	/* Serialize configuration through different ports of the same engine. */
++	netdev_lock(enet->napi_dev);
++	spin_lock_bh(&enet->lock);
++	WRITE_ONCE(enet->rx_coalesce_usecs, ec->rx_coalesce_usecs);
++	bcmbca_xrdp_set_irq_coalesce(enet);
++	spin_unlock_bh(&enet->lock);
++	netdev_unlock(enet->napi_dev);
++	return 0;
++}
++
++/* This setting applies to the shared RX FIFO, hence to all ports. */
++static int bcmbca_xrdp_set_priv_flags(struct net_device *ndev, u32 flags)
++{
++	struct bcmbca_xrdp_port *port = netdev_priv(ndev);
++	struct bcmbca_xrdp_enet *enet = port->enet;
++	unsigned long irqflags;
++	int ret = 0;
++
++	if (flags & ~BIT(0))
++		return -EINVAL;
++	if (!enet->variant->reduced.rx_irq_mailbox || enet->num_irqs != QUEUE_IRQ_COUNT)
++		return -EOPNOTSUPP;
++	mutex_lock(&enet->irq_test_lock);
++	netdev_lock(enet->napi_dev);
++	spin_lock_bh(&enet->lock);
++	spin_lock_irqsave(&enet->irq_lock, irqflags);
++	if (!enet->irq_ready || enet->stopping || enet->faulted) {
++		ret = -EIO;
++		goto out;
++	}
++	if (enet->rx_irq == !!flags)
++		goto out;
++	writel(0, bcmbca_xrdp_irq_base(enet) + QUEUE_IER);
++	writel(0, bcmbca_xrdp_irq_base(enet) + QUEUE_ITR);
++	writel(U32_MAX, bcmbca_xrdp_irq_base(enet) + QUEUE_ISR);
++	WRITE_ONCE(enet->rx_irq, !!flags);
++	bcmbca_xrdp_set_irq_coalesce(enet);
++	bcmbca_runner_reduced_irq_enable(&enet->runner, flags ? RX_QUEUE_IRQ : 0);
++	/* Start a drain on transition; subsequent RX batches require an IRQ. */
++	enet->rx_generation++;
++	enet->rx_active = true;
++	napi_schedule(&enet->napi);
++out:
++	spin_unlock_irqrestore(&enet->irq_lock, irqflags);
++	spin_unlock_bh(&enet->lock);
++	netdev_unlock(enet->napi_dev);
++	mutex_unlock(&enet->irq_test_lock);
++	return ret;
++}
++
+ static int bcmbca_xrdp_get_sset_count(struct net_device *ndev, int sset)
+ {
+ 	if (sset == ETH_SS_TEST)
+ 		return ARRAY_SIZE(bcmbca_xrdp_tests);
++	if (sset == ETH_SS_PRIV_FLAGS)
++		return ARRAY_SIZE(bcmbca_xrdp_priv_flags);
+ 	if (sset != ETH_SS_STATS)
+ 		return -EOPNOTSUPP;
+ 	return ARRAY_SIZE(bcmbca_xrdp_mib_stats) + ARRAY_SIZE(bcmbca_xrdp_sw_stats);
+@@ -1099,6 +1253,10 @@ static void bcmbca_xrdp_get_strings(stru
+ {
+ 	unsigned int i;
+ 
++	if (sset == ETH_SS_PRIV_FLAGS) {
++		memcpy(data, bcmbca_xrdp_priv_flags, sizeof(bcmbca_xrdp_priv_flags));
++		return;
++	}
+ 	if (sset == ETH_SS_TEST) {
+ 		memcpy(data, bcmbca_xrdp_tests, sizeof(bcmbca_xrdp_tests));
+ 		return;
+@@ -1153,11 +1311,20 @@ static void bcmbca_xrdp_get_stats(struct
+ 	data[i++] = (u32)atomic_read(&enet->timer_runs);
+ 	data[i++] = readl(bcmbca_xrdp_irq_base(enet) + QUEUE_ISR);
+ 	data[i++] = readl(bcmbca_xrdp_irq_base(enet) + QUEUE_IER);
++	data[i++] = enet->rx_irq;
++	data[i++] = enet->rx_irq_polls;
++	data[i++] = enet->rx_polling_polls;
++	data[i++] = bcmbca_runner_reduced_irq_count(&enet->runner);
+ 	spin_unlock_irqrestore(&enet->irq_lock, flags);
+ 	spin_unlock_bh(&enet->lock);
+ }
+ 
+ static const struct ethtool_ops bcmbca_xrdp_ethtool_ops = {
++	.supported_coalesce_params = ETHTOOL_COALESCE_RX_USECS,
++	.get_coalesce = bcmbca_xrdp_get_coalesce,
++	.set_coalesce = bcmbca_xrdp_set_coalesce,
++	.get_priv_flags = bcmbca_xrdp_get_priv_flags,
++	.set_priv_flags = bcmbca_xrdp_set_priv_flags,
+ 	.get_link = ethtool_op_get_link,
+ 	.get_link_ksettings = bcmbca_xrdp_get_link_ksettings,
+ 	.set_link_ksettings = bcmbca_xrdp_set_link_ksettings,
+@@ -1416,6 +1583,9 @@ static int bcmbca_xrdp_probe(struct plat
+ 	ret = bcmbca_xrdp_hw_init(enet);
+ 	if (ret)
+ 		goto put_ports;
++	if (variant->reduced.rx_irq_mailbox)
++		bcmbca_runner_reduced_irq_address(&enet->runner,
++						  res->start + variant->queue_intr + QUEUE_ITR);
+ 	/* The common reset must precede every per-PHY calibration/attach. */
+ 	if (variant == &bcm6846_variant) {
+ 		ret = bcm6846_xrdp_phy_init(enet, ports);
+@@ -1434,6 +1604,8 @@ static int bcmbca_xrdp_probe(struct plat
+ 	ret = bcmbca_xrdp_irq_init(pdev);
+ 	if (ret)
+ 		goto destroy_ports;
++	enet->rx_irq = variant->reduced.rx_irq_mailbox && enet->num_irqs == QUEUE_IRQ_COUNT;
++	enet->rx_active = enet->rx_irq;
+ 	for_each_available_child_of_node_scoped(ports, np) {
+ 		ret = bcmbca_xrdp_port_create(enet, np);
+ 		if (ret)
+@@ -1444,6 +1616,8 @@ static int bcmbca_xrdp_probe(struct plat
+ 	/* IRQ sources remain masked until the first NAPI pass completes. */
+ 	spin_lock_irqsave(&enet->irq_lock, flags);
+ 	enet->irq_ready = enet->num_irqs == QUEUE_IRQ_COUNT;
++	if (enet->rx_irq)
++		bcmbca_runner_reduced_irq_enable(&enet->runner, RX_QUEUE_IRQ);
+ 	spin_unlock_irqrestore(&enet->irq_lock, flags);
+ 	napi_schedule(&enet->napi);
+ 	return 0;
+--- a/drivers/net/ethernet/broadcom/runner-asm/README.rst
++++ b/drivers/net/ethernet/broadcom/runner-asm/README.rst
+@@ -12,8 +12,9 @@ set, conditional patching language or Be
+ This is an encoding assembler for the supplied single-issue BCM6846 image,
+ not a complete description of the Runner ISA or an ACE-compatible assembler.
+ The instruction forms below distinguish decoded operands from fields whose
+-meaning remains unresolved. In particular, a byte-identical rebuild does
+-not establish how to issue a packet notification. Do not use the unresolved
++meaning remains unresolved. The notification extension below reuses an observed external write.
++Packet notification delivery has been tested on BCM6846; the instruction
++is not a general-purpose DMA interface. Do not use the unresolved
+ forms as documented peripheral operations, or assume compatibility with
+ the dual-issue Runner in newer SoCs.
+ 
+@@ -33,7 +34,8 @@ Run the host tests from the source tree
+   python3 drivers/net/ethernet/broadcom/runner-asm/test.py \
+     build-codex/drivers/net/ethernet/broadcom/runner-asm/runner-as
+ 
+-The reference digest is for all 8192 big-endian instruction words, including
++After undoing the three-word notification hook and its extension in padding,
++the tests check this reference digest for all 8192 instruction words, including
+ NOP padding, reconstructed from the original U-Boot register-write list::
+ 
+   924fa9aa8cd5c463a6e913ea7a441f06caad9b1a16b0efb92359245f320d8d6d
+@@ -175,9 +177,82 @@ notification sequence at 0x6848 stores r
+ by class 0x35, with fields d=14, a=18, b=4, x=8, y=0, m=1. The sequence
+ recurs at 0x688c/0x6890. This suggests an external write of a four-byte
+ mask, but the field interpretation and completion rules are not proven.
+-It is not an instruction form implemented by this assembler yet.
+-
+-Peripheral command encodings, descriptor publication ordering and interrupt
+-acknowledgment still need investigation and hardware testing. This
+-conversion intentionally preserves the original program and polling
+-fallback; it does not add packet-generated interrupts.
++The assembler names this form ``write.ext``, with the same six encoding
++fields as the ALU forms. Its register operands and control fields are copied
++unchanged in the notification extension. The name describes the inferred
++operation; it does not specify the remaining class 0x35 modes.
++
++RX notification extension
++-------------------------
++
++The hook at PC 0x23c transfers to 0x334 with two NOP delay slots, using
++control 0x1400 as in the reset vector and PON coalescing loop. The three
++displaced counter instructions execute first. The FIFO descriptor has
++already been published, and its existing producer update is unchanged.
++All other original instructions and task entry addresses remain unchanged.
++The extension preserves r8, r14 and r18/r19, copies the vendor notification
++sequence, then returns to the original recycling path at 0x248. It never
++runs on the FIFO-full branch. The zero-enable branch uses the original
++initialization routine's compare/equal-jump encoding.
++
++The SRAM mailbox occupies previously unused space between the debug save
++area (0x2c0..0x33f) and the descriptor FIFO (0x800..0xbff):
++
++=========== ============================================================
++Offset      Contents
++=========== ============================================================
++0x380       Host enable word: zero or queue-0 mask (1)
++0x384       Runner-owned notification mask, retained until reset
++0x388       Queue ITR physical address, low word followed by high word
++0x390       Runner count of issued notification instructions
++0x3a0..3af  RX task's saved r8, r14, r18 and r19
++=========== ============================================================
++
++All words use Runner big-endian SRAM order. The host initializes the
++address pair before enabling notifications. The mask is immutable while
++notifications are enabled and remains valid after disabling them; the
++extension does not need to reuse a DMA source buffer before completion.
++Only the RX task uses the save area. TX and debug retain their old ABI.
++
++Packet-generated interrupts, patterned traffic and interface restarts
++have been tested on BCM6846. The attempt counter alone proves only
++execution past the write instruction, not arrival at the host. These
++tests do not establish a general Runner memory barrier, external-write
++completion semantics or a full ISA specification.
++
++The driver's shared ``rx-irq`` ethtool private flag defaults on when the
++Runner mailbox and all queue interrupts are available. Older device trees
++without interrupts retain timer-driven receive. Queue 0 starts an RX NAPI
++batch. TX timers cannot start a new RX batch. The host masks
++notifications and clears ITR/ISR before draining, then unmasks after NAPI
++completion without clearing arrivals during the drain. Full-budget polls
++and deferred NAPI repolls retain RX ownership. TX completion polling
++remains available only while TX work is outstanding. Turning the flag off
++restores 1-ms RX polling.
++The synthetic IRQ self-test is refused while IRQ receive is enabled so
++that it cannot masquerade as packet notifications.
++
++The shared ethtool ``rx-usecs`` setting controls NAPI software IRQ
++coalescing, with a default of zero and a range of 0..1000 microseconds.
++The first IRQ schedules NAPI immediately. Subsequent polls may defer IRQ
++rearming for the configured interval; one empty poll ends the batch.
++Zero disables deferral. Coalescing is inactive in polling mode. Because
++the engine has one NAPI instance, configuring any MAC port changes the
++setting for all ports, including the DSA conduit.
++
++For a direct test, enable the flag on the MAC netdevice (the DSA conduit
++for a switch port)::
++
++  ethtool -C eth0 rx-usecs 50
++  ethtool --set-priv-flags eth0 rx-irq on
++  ethtool -S eth0
++
++Require increasing ``shared_runner_notifications``,
++``shared_queue_irq_events`` and ``shared_rx_irq_polls``, unchanged
++``shared_rx_polling_polls`` and ``shared_irq_test_events``, and successful
++patterned traffic. Test sparse packets after idle, sustained RX, full
++budgets, bidirectional traffic and interface restart recovery. Compare RX
++throughput, UDP loss, socket drops and CPU consumption with the flag off,
++with IRQ receive and zero deferral, and with IRQ coalescing using the same
++image. A timer still services TX: its counter alone does not indicate RX
++fallback.
+--- a/drivers/net/ethernet/broadcom/runner-asm/insn.c
++++ b/drivers/net/ethernet/broadcom/runner-asm/insn.c
+@@ -59,6 +59,8 @@ static const struct opcode opcodes[] = {
+ 	{ "op30", 0xc0000000, NORMAL, 6, ALU_FIELDS },
+ 	{ "op31", 0xc4000000, NORMAL, 6, ALU_FIELDS },
+ 	{ "op33", 0xcc000000, NORMAL, 6, ALU_FIELDS },
++	/* Interrupt-mask transfer; control operands remain explicit. */
++	{ "write.ext", 0xd4000000, NORMAL, 6, ALU_FIELDS },
+ };
+ 
+ static uint32_t field_value(uint32_t value, struct field field)
+--- a/drivers/net/ethernet/broadcom/runner-asm/test.py
++++ b/drivers/net/ethernet/broadcom/runner-asm/test.py
+@@ -38,12 +38,37 @@ class AssemblerTest(unittest.TestCase):
+     def test_vendor_image(self):
+         # Digest of instruction RAM reconstructed independently from the
+         # original initialization writes, including their NOP fill.
+-        data = self.assemble(SOURCE.read_text())
++        data = bytearray(self.assemble(SOURCE.read_text()))
+         self.assertEqual(len(data), 32768)
++        # The notification hook displaces exactly these three counter
++        # instructions to the old start of padding. All other old code,
++        # including the FIFO publication and task entry PCs, must match.
++        displaced = struct.pack(">3I", 0x80c68180, 0x82c60080, 0x36c40026)
++        self.assertEqual(data[0x334:0x340], displaced)
++        self.assertEqual(data[0x23c:0x248],
++                         struct.pack(">3I", 0x068000cd, 0xfc000000, 0xfc000000))
++        data[0x23c:0x248] = displaced
++        data[0x334:] = struct.pack(">I", 0xfc000000) * ((32768 - 0x334) // 4)
+         self.assertEqual(hashlib.sha256(data).hexdigest(),
+                          "924fa9aa8cd5c463a6e913ea7a441f06ca"
+                          "ad9b1a16b0efb92359245f320d8d6d")
+ 
++    def test_notification_vector(self):
++        # Reference interrupt-mask transfer instructions at 0x6848/0x684c.
++        self.assemble("store r8, r14, 0, 2\n"
++                      "write.ext r14, r18, 4, 8, 0, 1\n",
++                      [0x34870002, 0xd6e92080])
++
++    def test_notification_restore(self):
++        data = self.assemble(SOURCE.read_text())
++        words = struct.unpack(">8192I", data)
++        self.assertEqual(words.count(0xd6e92080), 1)
++        # The notification path must restore the RX packet state and
++        # branch back with two NOP delay slots, never fall into padding.
++        restore = struct.pack(">6I", 0x32803a02, 0x32e03a42, 0x33203a83,
++                              0x06800092, 0xfc000000, 0xfc000000)
++        self.assertIn(restore, data[0x334:0x400])
++
+     def test_vendor_vectors(self):
+         self.assemble("jump init, 0x1400\nnop\nnop\n"
+                       "init:\nld32.abs r1, 0x64\nld64.abs r2, 0x68\n",

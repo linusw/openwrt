@@ -1,0 +1,22 @@
+From 925aa4e3b8fc4827b46385c7f13d8cb08bec56e3 Mon Sep 17 00:00:00 2001
+From: Linus Walleij <linusw@kernel.org>
+Date: Fri, 6 Nov 2026 00:44:01 +0100
+Subject: [PATCH] dt-bindings: rng: brcm,iproc-rng200: Add power-domains
+
+The BCM6846 RNG200 controller is powered by the PMB peripheral
+domain. Allow one optional power domain so the SoC device tree can
+describe this dependency.
+
+---
+--- a/Documentation/devicetree/bindings/rng/brcm,iproc-rng200.yaml
++++ b/Documentation/devicetree/bindings/rng/brcm,iproc-rng200.yaml
+@@ -17,6 +17,9 @@ properties:
+       - brcm,bcm7278-rng200
+       - brcm,iproc-rng200
+ 
++  power-domains:
++    maxItems: 1
++
+   reg:
+     maxItems: 1
+ 

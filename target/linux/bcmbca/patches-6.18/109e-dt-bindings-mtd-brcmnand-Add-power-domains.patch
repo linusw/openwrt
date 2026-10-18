@@ -1,0 +1,22 @@
+From 9f9e9af9045f1ef0bf3d96e752304a43c368bf5a Mon Sep 17 00:00:00 2001
+From: Linus Walleij <linusw@kernel.org>
+Date: Fri, 6 Nov 2026 00:44:01 +0100
+Subject: [PATCH] dt-bindings: mtd: brcmnand: Add power-domains
+
+The BCM6846 NAND controller is powered by the PMB peripheral
+domain. Allow one optional power domain so the SoC device tree can
+describe this dependency.
+
+---
+--- a/Documentation/devicetree/bindings/mtd/brcm,brcmnand.yaml
++++ b/Documentation/devicetree/bindings/mtd/brcm,brcmnand.yaml
+@@ -74,6 +74,9 @@ properties:
+           - const: brcm,brcmnand-v4.0
+           - const: brcm,brcmnand
+ 
++  power-domains:
++    maxItems: 1
++
+   reg:
+     minItems: 1
+     maxItems: 6

@@ -1,0 +1,1392 @@
+From 3a95c041e5c2011b51472fb22005b72055864278 Mon Sep 17 00:00:00 2001
+From: Linus Walleij <linusw@kernel.org>
+Date: Thu, 29 Oct 2026 00:58:11 +0100
+Subject: [PATCH] net: broadcom: Assemble the BCM6846 Runner program at build
+ time
+
+Move the reduced BCM6846 Runner program from the register initialization
+array to a symbolic source file. Add a two-pass flex/bison assembler,
+organized around a scanner, grammar, symbol table and instruction encoder
+as in aicasm. Resolve labels and constants, check operand bounds and keep
+fixed entry-point assertions for the host context ABI.
+
+Generate big-endian instruction bytes and embed them in a read-only
+binary object linked into the Ethernet driver. Load the image with the
+Runner helper at the original instruction-RAM initialization step.
+Preserve the complete vendor image, including NOP padding, and the order
+of all other initialization writes.
+
+Document the encoding evidence from the reduced, CFE2 and PON images.
+Use symbolic names for decoded forms while retaining explicit fields
+for unresolved control and peripheral operations. Packet-notification
+semantics are not established by this conversion; RX still uses the
+existing polling fallback.
+
+Add host tests for the original-image digest, encoding vectors, labels,
+expressions, field limits and malformed input.
+
+Signed-off-by: Linus Walleij <linusw@kernel.org>
+
+---
+--- a/MAINTAINERS
++++ b/MAINTAINERS
+@@ -4939,6 +4939,7 @@ S:	Maintained
+ T:	git https://github.com/broadcom/stblinux.git
+ F:	Documentation/devicetree/bindings/arm/bcm/brcm,bcmbca.yaml
+ F:	arch/arm64/boot/dts/broadcom/bcmbca/*
++F:	drivers/net/ethernet/broadcom/runner-asm/
+ N:	bcmbca
+ N:	bcm[9]?47622
+ N:	bcm[9]?4912
+--- a/drivers/net/ethernet/broadcom/Makefile
++++ b/drivers/net/ethernet/broadcom/Makefile
+@@ -7,7 +7,7 @@ obj-$(CONFIG_B44) += b44.o
+ obj-$(CONFIG_BCM4908_ENET) += bcm4908_enet.o
+ obj-$(CONFIG_BCM63XX_ENET) += bcm63xx_enet.o
+ obj-$(CONFIG_BCMBCA_XRDP_ETH) += bcmbca-xrdp.o
+-bcmbca-xrdp-y := bcmbca_xrdp.o bcmbca_runner.o
++bcmbca-xrdp-y := bcmbca_xrdp.o bcmbca_runner.o bcm6846_runner.o
+ obj-$(CONFIG_BCMBCA_XRDP_ETH_KUNIT_TEST) += bcmbca_xrdp_test.o
+ obj-$(CONFIG_BCMGENET) += genet/
+ obj-$(CONFIG_BNX2) += bnx2.o
+@@ -22,3 +22,19 @@ obj-$(CONFIG_SYSTEMPORT) += bcmsysport.o
+ obj-$(CONFIG_BNXT) += bnxt/
+ obj-$(CONFIG_BCMASP) += asp2/
+ obj-$(CONFIG_BNGE) += bnge/
++
++# Keep host-generated files in the output tree, including flex/bison output.
++subdir- += runner-asm
++
++$(obj)/runner-asm/runner-as: FORCE
++	$(Q)$(MAKE) $(build)=$(obj)/runner-asm
++
++quiet_cmd_runner = RUNNER  $@
++      cmd_runner = $(obj)/runner-asm/runner-as $< $@
++
++$(obj)/bcm6846_runner.bin: $(src)/bcm6846_runner.rnr $(obj)/runner-asm/runner-as FORCE
++	$(call if_changed,runner)
++
++targets += bcm6846_runner.bin
++$(obj)/bcm6846_runner.o: $(obj)/bcm6846_runner.bin
++AFLAGS_bcm6846_runner.o += -I$(obj)
+--- a/drivers/net/ethernet/broadcom/bcm6846_enet_data.h
++++ b/drivers/net/ethernet/broadcom/bcm6846_enet_data.h
+@@ -2,8 +2,9 @@
+ /*
+  * Copyright 2019 Broadcom Ltd.
+  *
+- * BCM6846 reduced XRDP initialization and Runner program.
+- * Keep the recorded write ordering and byte order intact. The transmit
++ * BCM6846 reduced XRDP register and SRAM initialization.
++ * The Runner program is assembled separately from bcm6846_runner.rnr.
++ * Keep the recorded register write ordering and byte order intact. The transmit
+  * front-end FIFO layout is:
+  * 320 eight-byte entries and 40 descriptors per queue, with unused queue
+  * 6/7 bases at zero. Size fields encode the entry count minus one.
+@@ -14,69 +15,8 @@ static const struct bcmbca_xrdp_init_ent
+ 	{ 0x40140008, 0x000c0000 }, { 0x4014000c, 0x82100000 }, { 0x40140010, 0x000c0000 },
+ 	{ 0x40140014, 0x82180000 }, { 0x40140018, 0x000c0000 }, { 0x05c00000, 0x00000000 },
+ 	{ 0x02000000, 0x00004000 }, { 0x82c00000, 0x00000000 }, { 0x02000000, 0x00000800 },
+-	{ 0x82c18000, 0x00000000 }, { 0x03000000, 0x00002000 }, { 0x82c10000, 0xfc000000 },
+-	{ 0x41c10000, 0x06008006 }, { 0x41c1000c, 0x1a008006 }, { 0x41c10018, 0x42061032 },
+-	{ 0x41c1001c, 0x83062032 }, { 0x41c10020, 0x00000024 }, { 0x41c10024, 0x03074032 },
+-	{ 0x41c10028, 0x83076032 }, { 0x41c1002c, 0x05f8040a }, { 0x41c10030, 0x00c094ac },
+-	{ 0x41c10034, 0x00008020 }, { 0x41c10038, 0x740180b0 }, { 0x41c1003c, 0x230104cc },
+-	{ 0x41c10040, 0x00b8d9ac }, { 0x41c10044, 0xf4ffc3b0 }, { 0x41c10048, 0x80a10684 },
+-	{ 0x41c1004c, 0x19800006 }, { 0x41c10050, 0x0e18d4a8 }, { 0x41c10054, 0x0400c0b0 },
+-	{ 0x41c10058, 0x00008020 }, { 0x41c1005c, 0x040380b0 }, { 0x41c10060, 0x862104cc },
+-	{ 0x41c10064, 0x00000020 }, { 0x41c10068, 0x022c0036 }, { 0x41c1006c, 0x422c1036 },
+-	{ 0x41c10070, 0x832c2036 }, { 0x41c10074, 0x032d4036 }, { 0x41c10078, 0x832d6036 },
+-	{ 0x41c1007c, 0x032e8036 }, { 0x41c10080, 0x832ea036 }, { 0x41c10084, 0x032fc036 },
+-	{ 0x41c10088, 0x832fe036 }, { 0x41c1008c, 0x03300037 }, { 0x41c10090, 0x83302037 },
+-	{ 0x41c10094, 0x03314037 }, { 0x41c10098, 0x83316037 }, { 0x41c1009c, 0x03328037 },
+-	{ 0x41c100a0, 0x8332a037 }, { 0x41c100a4, 0x0333c037 }, { 0x41c100a8, 0x8333e037 },
+-	{ 0x41c100ac, 0x820080c6 }, { 0x41c100b0, 0x001684ac }, { 0x41c100b4, 0xc20e8036 },
+-	{ 0x41c100b8, 0x2f602002 }, { 0x41c100bc, 0x30602002 }, { 0x41c100c0, 0x31602002 },
+-	{ 0x41c100c4, 0x000000c2 }, { 0x41c100c8, 0x33602002 }, { 0x41c100cc, 0x34602002 },
+-	{ 0x41c100d0, 0x35602002 }, { 0x41c100d4, 0x022c0032 }, { 0x41c100d8, 0x422c1032 },
+-	{ 0x41c100dc, 0x832c2032 }, { 0x41c100e0, 0x032d4032 }, { 0x41c100e4, 0x832d6032 },
+-	{ 0x41c100e8, 0x032e8032 }, { 0x41c100ec, 0x832ea032 }, { 0x41c100f0, 0x032fc032 },
+-	{ 0x41c100f4, 0x832fe032 }, { 0x41c100f8, 0x03300033 }, { 0x41c100fc, 0x83302033 },
+-	{ 0x41c10100, 0x03314033 }, { 0x41c10104, 0x83316033 }, { 0x41c10108, 0x03328033 },
+-	{ 0x41c1010c, 0x8332a033 }, { 0x41c10110, 0x0333c033 }, { 0x41c10114, 0x8333e033 },
+-	{ 0x41c10124, 0x01008022 }, { 0x41c10134, 0x4400c0b0 }, { 0x41c10138, 0x040080b0 },
+-	{ 0x41c1013c, 0x0001c69e }, { 0x41c10140, 0x8001c480 }, { 0x41c10144, 0x140040b0 },
+-	{ 0x41c1014c, 0x02008630 }, { 0x41c10150, 0x80008480 }, { 0x41c10154, 0x02008634 },
+-	{ 0x41c10158, 0x26008632 }, { 0x41c1015c, 0x80008482 }, { 0x41c10160, 0x26008636 },
+-	{ 0x41c10164, 0x47002833 }, { 0x41c10168, 0x0300e830 }, { 0x41c1016c, 0x402689ac },
+-	{ 0x41c10170, 0x507c890a }, { 0x41c10174, 0xc0aa87ad }, { 0x41c10178, 0x20004497 },
+-	{ 0x41c1017c, 0x0400d0b0 }, { 0x41c10180, 0x040080b0 }, { 0x41c10184, 0x0081d69e },
+-	{ 0x41c10188, 0xa0018480 }, { 0x41c1018c, 0x00b8c7ac }, { 0x41c10190, 0x040060b1 },
+-	{ 0x41c10194, 0x0200d430 }, { 0x41c10198, 0x8080d680 }, { 0x41c1019c, 0x0200d434 },
+-	{ 0x41c101a0, 0x2600d432 }, { 0x41c101a4, 0x8081d680 }, { 0x41c101a8, 0x8080d682 },
+-	{ 0x41c101ac, 0x2600d436 }, { 0x41c101b0, 0x040070b1 }, { 0x41c101b4, 0x0400e0b0 },
+-	{ 0x41c101b8, 0x06a0a4a8 }, { 0x41c101bc, 0x1f0462a9 }, { 0x41c101c0, 0x061c60a9 },
+-	{ 0x41c101c4, 0x85c24431 }, { 0x41c101c8, 0x040080b0 }, { 0x41c101cc, 0x0400d0b0 },
+-	{ 0x41c101d0, 0x1f0470a9 }, { 0x41c101d4, 0x07a4e5a8 }, { 0x41c101d8, 0x0628aca8 },
+-	{ 0x41c101dc, 0x001860a9 }, { 0x41c101e0, 0x79156aa9 }, { 0x41c101e4, 0x0ec889a8 },
+-	{ 0x41c101e8, 0x02b8d7a8 }, { 0x41c101ec, 0x1d0470a9 }, { 0x41c101f0, 0x26805833 },
+-	{ 0x41c101f8, 0x9ae03a02 }, { 0x41c101fc, 0x47806837 }, { 0x41c10200, 0x06808836 },
+-	{ 0x41c10204, 0x2680d836 }, { 0x41c10208, 0x044080b0 }, { 0x41c1020c, 0x00821883 },
+-	{ 0x41c10210, 0x1400d0b0 }, { 0x41c10214, 0x08811889 }, { 0x41c10218, 0x040080b0 },
+-	{ 0x41c1021c, 0x0081d69e }, { 0x41c10220, 0xa0018480 }, { 0x41c1022c, 0x0200d430 },
+-	{ 0x41c10230, 0x8080d680 }, { 0x41c10234, 0x0200d434 }, { 0x41c10238, 0x2600d432 },
+-	{ 0x41c1023c, 0x8081c680 }, { 0x41c10240, 0x8000c682 }, { 0x41c10244, 0x2600c436 },
+-	{ 0x41c10248, 0x06a0a4a8 }, { 0x41c1024c, 0x090005cc }, { 0x41c10250, 0x1f0422a9 },
+-	{ 0x41c10254, 0x6e1dfaa8 }, { 0x41c10258, 0x0628aca8 }, { 0x41c1025c, 0x47130024 },
+-	{ 0x41c10260, 0xc84125cd }, { 0x41c10268, 0x340090b1 }, { 0x41c1026c, 0x040050b1 },
+-	{ 0x41c10270, 0x00819c9f }, { 0x41c10274, 0x20835a81 }, { 0x41c10280, 0x02809a31 },
+-	{ 0x41c10284, 0x80809c81 }, { 0x41c10288, 0x02809a35 }, { 0x41c1028c, 0x26809a33 },
+-	{ 0x41c10290, 0x80819c81 }, { 0x41c10294, 0x80809c83 }, { 0x41c10298, 0x26809a37 },
+-	{ 0x41c1029c, 0x240050b1 }, { 0x41c102a0, 0x02ae0ac2 }, { 0x41c102a4, 0x061f0024 },
+-	{ 0x41c102b0, 0x2400c0b0 }, { 0x41c102b4, 0x040080b0 }, { 0x41c102b8, 0x0001c69e },
+-	{ 0x41c102bc, 0x80018480 }, { 0x41c102c0, 0x85c24431 }, { 0x41c102c8, 0x0200c430 },
+-	{ 0x41c102cc, 0x8000c680 }, { 0x41c102d0, 0x0200c434 }, { 0x41c102d4, 0x2600c432 },
+-	{ 0x41c102d8, 0x8000c682 }, { 0x41c102dc, 0x10008007 }, { 0x41c102e0, 0x2600c436 },
+-	{ 0x41c102e4, 0x240180b0 }, { 0x41c102e8, 0x92000006 }, { 0x41c102ec, 0x0400a0b0 },
+-	{ 0x41c102f0, 0x0408b0b0 }, { 0x41c102f4, 0x0001a59e }, { 0x41c102f8, 0x4081a580 },
+-	{ 0x41c102fc, 0x140040b0 }, { 0x41c10304, 0x0200b530 }, { 0x41c10308, 0x8080b580 },
+-	{ 0x41c1030c, 0x0200b534 }, { 0x41c10310, 0x2600b532 }, { 0x41c10314, 0x8080b582 },
+-	{ 0x41c10318, 0x2600b536 }, { 0x41c1031c, 0x0300e430 }, { 0x41c10320, 0x4700c432 },
+-	{ 0x41c10324, 0x0280a430 }, { 0x41c10328, 0xc141c5cc }, { 0x41c1032c, 0xc72e0024 },
+-	{ 0x41c10330, 0x26000436 }, { 0x40d0004c, 0x00000004 }, { 0x40d0104c, 0x00000002 },
++	{ 0x82c18000, 0x00000000 }, { 0x08c10000, 0x00008000 },
++	{ 0x40d0004c, 0x00000004 }, { 0x40d0104c, 0x00000002 },
+ 	{ 0x40d0104c, 0x00000002 }, { 0x40d00044, 0x00000826 }, { 0x41c00060, 0x00000000 },
+ 	{ 0x41c00064, 0x01000000 }, { 0x41c00068, 0x00000000 }, { 0x41c0006c, 0x00000000 },
+ 	{ 0x41c00070, 0x00000000 }, { 0x41c00074, 0x00000000 }, { 0x41c00078, 0x00000000 },
+--- /dev/null
++++ b/drivers/net/ethernet/broadcom/bcm6846_runner.S
+@@ -0,0 +1,10 @@
++/* SPDX-License-Identifier: GPL-2.0-only */
++#include <linux/linkage.h>
++
++	.section .rodata.bcm6846_runner, "a"
++	.balign 4
++SYM_DATA_START(bcm6846_runner_start)
++	.incbin "bcm6846_runner.bin"
++SYM_DATA_END_LABEL(bcm6846_runner_start, SYM_L_GLOBAL, bcm6846_runner_end)
++
++	.section .note.GNU-stack, "", %progbits
+--- /dev/null
++++ b/drivers/net/ethernet/broadcom/bcm6846_runner.rnr
+@@ -0,0 +1,279 @@
++# SPDX-License-Identifier: GPL-2.0-or-later
++# Copyright 2019 Broadcom Ltd.
++#
++# BCM6846 reduced SRAM Buffer Pool Manager (SBPM) Runner program.
++# Addresses are byte addresses.
++# Encoding forms and unresolved fields are documented in runner-asm/README.rst.
++# The explicit control operands preserve pipeline and peripheral behavior.
++#
++# The host initializes r16 with the task PC in its high half. Keep these
++# entry addresses stable until the context initialization is updated too.
++
++.const GLOBAL_REGS = 0x60
++.const DEBUG_REGS = 0x2c0
++.const TASK_INDEX = 0xec
++.const MEM32 = 0x02
++.const MEM64 = 0x03
++.const MEM_EXT32 = 0x16
++.const MEM_EXT64 = 0x17
++.const BR_DEBUG = 0x1103
++.const BR_FIFO_BUSY = 0x11d7
++.const JMP_VECTOR = 0x1400
++.const JMP_INIT_EXIT = 0x1004
++.const JMP_RECYCLE = 0x1000
++.const JMP_TASK = 0x1c00
++
++.assert_pc 0x0000
++reset_vector:
++	jump initialization, JMP_VECTOR
++	nop
++	nop
++
++.assert_pc 0x000c
++debug_vector:
++	jump debug_save, JMP_VECTOR
++	nop
++	nop
++
++.assert_pc 0x0018
++initialization:
++	ld32.abs r1, GLOBAL_REGS + 0x4
++	ld64.abs r2, GLOBAL_REGS + 0x8
++	op09 0x0, 0x0
++	ld64.abs r4, GLOBAL_REGS + 0x10
++	ld64.abs r6, GLOBAL_REGS + 0x18
++	op02 0, 9, 0, 30, 5, 1
++	field.2b r9, r9, 0, 16, 0, 0
++	op08 0x400, 0x0
++	movi r8, 0x17
++	op33 0, 8, 9, 0, 3, 0
++	field.2b r13, r19, 0, 14, 0, 0
++	movi r12, 0x3fff
++	alu.sub r0, r13, 12, 8, 0, 0
++	jump initialization_done, JMP_INIT_EXIT
++	field.2a r13, r8, 0, 6, 14, 0
++	movi r12, 0x0
++	op08 0x400, 0x0
++	movi r8, 0x30
++	op33 0, 8, 12, 8, 6, 0
++
++.assert_pc 0x0064
++initialization_done:
++	op08 0x0, 0x0
++
++.assert_pc 0x0068
++debug_save:
++	st32.abs r0, DEBUG_REGS + 0x0
++	st32.abs r1, DEBUG_REGS + 0x4
++	st64.abs r2, DEBUG_REGS + 0x8
++	st64.abs r4, DEBUG_REGS + 0x10
++	st64.abs r6, DEBUG_REGS + 0x18
++	st64.abs r8, DEBUG_REGS + 0x20
++	st64.abs r10, DEBUG_REGS + 0x28
++	st64.abs r12, DEBUG_REGS + 0x30
++	st64.abs r14, DEBUG_REGS + 0x38
++	st64.abs r16, DEBUG_REGS + 0x40
++	st64.abs r18, DEBUG_REGS + 0x48
++	st64.abs r20, DEBUG_REGS + 0x50
++	st64.abs r22, DEBUG_REGS + 0x58
++	st64.abs r24, DEBUG_REGS + 0x60
++	st64.abs r26, DEBUG_REGS + 0x68
++	st64.abs r28, DEBUG_REGS + 0x70
++	st64.abs r30, DEBUG_REGS + 0x78
++	op31 8, 0, 4, 0, 2, 1
++	field.2b r8, r8, 16, 5, 0, 0
++	st32.abs r8, TASK_INDEX + 0x0
++	branch label_00bc, BR_DEBUG
++
++.assert_pc 0x00bc
++label_00bc:
++	branch label_00c0, BR_DEBUG
++
++.assert_pc 0x00c0
++label_00c0:
++	branch label_00c4, BR_DEBUG
++
++.assert_pc 0x00c4
++label_00c4:
++	op30 0, 0, 0, 0, 0, 1
++	branch label_00cc, BR_DEBUG
++
++.assert_pc 0x00cc
++label_00cc:
++	branch label_00d0, BR_DEBUG
++
++.assert_pc 0x00d0
++label_00d0:
++	branch debug_restore, BR_DEBUG
++
++.assert_pc 0x00d4
++debug_restore:
++	ld32.abs r0, DEBUG_REGS + 0x0
++	ld32.abs r1, DEBUG_REGS + 0x4
++	ld64.abs r2, DEBUG_REGS + 0x8
++	ld64.abs r4, DEBUG_REGS + 0x10
++	ld64.abs r6, DEBUG_REGS + 0x18
++	ld64.abs r8, DEBUG_REGS + 0x20
++	ld64.abs r10, DEBUG_REGS + 0x28
++	ld64.abs r12, DEBUG_REGS + 0x30
++	ld64.abs r14, DEBUG_REGS + 0x38
++	ld64.abs r16, DEBUG_REGS + 0x40
++	ld64.abs r18, DEBUG_REGS + 0x48
++	ld64.abs r20, DEBUG_REGS + 0x50
++	ld64.abs r22, DEBUG_REGS + 0x58
++	ld64.abs r24, DEBUG_REGS + 0x60
++	ld64.abs r26, DEBUG_REGS + 0x68
++	ld64.abs r28, DEBUG_REGS + 0x70
++	ld64.abs r30, DEBUG_REGS + 0x78
++	nop
++	nop
++	nop
++	op08 0x1400, 0x1
++	nop
++	nop
++	nop
++
++.assert_pc 0x0134
++cpu_rx:
++	movi r12, 0x4
++	movi r8, 0x0
++	alu.mul r12, r12, 8, 0, 0, 1
++	alu.add r12, r8, 12, 0, 0, 0
++	movi r4, 0x1
++	nop
++	load r8, r12, 0x0, MEM32
++	alu.add r8, r8, 4, 0, 0, 0
++	store r8, r12, 0x0, MEM32
++	load r8, r12, 0x2, MEM_EXT32
++	alu.add r8, r8, 4, 0, 0, 1
++	store r8, r12, 0x2, MEM_EXT32
++	load r18, r16, 0x4, MEM_EXT64
++	load r14, r16, 0x0, MEM64
++	field.2b r8, r18, 18, 9, 0, 0
++	op02 8, 18, 2, 31, 16, 1
++	field.2b r24, r15, 22, 10, 0, 0
++	alu.shift r20, r8, 1, 0, 0, 1
++	movi r13, 0x0
++	movi r8, 0x0
++	alu.mul r13, r13, 8, 0, 0, 1
++	alu.add r8, r8, 13, 0, 0, 0
++	field.2b r12, r15, 0, 14, 0, 0
++	movi r22, 0x0
++	load r13, r8, 0x0, MEM32
++	alu.add r13, r13, 4, 0, 0, 0
++	store r13, r8, 0x0, MEM32
++	load r13, r8, 0x2, MEM_EXT32
++	alu.add r13, r13, 12, 0, 0, 0
++	alu.add r13, r13, 4, 0, 0, 1
++	store r13, r8, 0x2, MEM_EXT32
++	movi r23, 0x0
++	movi r14, 0x0
++	field.2a r10, r9, 0, 8, 6, 0
++	field.2a r22, r4, 0, 1, 31, 0
++	field.2a r22, r0, 0, 7, 6, 0
++	load r20, r9, 0x428, 0x5
++	movi r8, 0x0
++	movi r13, 0x0
++	field.2a r23, r0, 0, 1, 31, 0
++	field.2a r14, r11, 0, 9, 7, 0
++	field.2a r10, r24, 0, 10, 6, 0
++	field.2a r22, r0, 0, 6, 0, 0
++	field.2a r22, r20, 11, 5, 25, 0
++	field.2a r8, r19, 0, 18, 14, 0
++	field.2a r13, r15, 0, 14, 2, 0
++	field.2a r23, r0, 0, 1, 29, 0
++	load r21, r17, 0x2, MEM_EXT32
++	nop
++	branch rx_fifo_busy, BR_FIFO_BUSY
++	store r22, r17, 0x4, MEM_EXT64
++	store r8, r17, 0x0, MEM_EXT32
++	store r13, r17, 0x2, MEM_EXT32
++	movi r8, 0x400
++	alu.add r17, r17, 16, 0, 0, 1
++	movi r13, 0x1
++	alu.and r17, r17, 8, 0, 8, 0
++	movi r8, 0x0
++	alu.mul r13, r13, 8, 0, 0, 1
++	alu.add r8, r8, 13, 0, 0, 0
++	nop
++	nop
++	load r13, r8, 0x0, MEM32
++	alu.add r13, r13, 4, 0, 0, 0
++	store r13, r8, 0x0, MEM32
++	load r13, r8, 0x2, MEM_EXT32
++	alu.add r12, r13, 12, 0, 0, 0
++	alu.add r12, r12, 4, 0, 0, 1
++	store r12, r8, 0x2, MEM_EXT32
++
++.assert_pc 0x0248
++rx_recycle:
++	field.2a r10, r9, 0, 8, 6, 0
++	op33 0, 10, 0, 0, 9, 0
++	field.2a r18, r4, 0, 1, 31, 0
++	field.2a r15, r20, 11, 7, 14, 0
++	field.2a r10, r24, 0, 10, 6, 0
++	op09 0x0, 0x1347
++	op33 18, 10, 14, 16, 8, 0
++	nop
++
++.assert_pc 0x0268
++rx_fifo_busy:
++	movi r25, 0x3
++	movi r21, 0x0
++	alu.mul r25, r25, 8, 0, 0, 1
++	alu.add r21, r21, 25, 0, 0, 0
++	nop
++	nop
++	load r25, r21, 0x0, MEM32
++	alu.add r25, r25, 4, 0, 0, 0
++	store r25, r21, 0x0, MEM32
++	load r25, r21, 0x2, MEM_EXT32
++	alu.add r25, r25, 12, 0, 0, 0
++	alu.add r25, r25, 4, 0, 0, 1
++	store r25, r21, 0x2, MEM_EXT32
++	movi r21, 0x2
++	op30 0, 21, 16, 11, 2, 1
++	op09 0x0, 0x1f06
++	nop
++	nop
++	movi r12, 0x2
++	movi r8, 0x0
++	alu.mul r12, r12, 8, 0, 0, 1
++	alu.add r8, r8, 12, 0, 0, 0
++	load r20, r9, 0x428, 0x5
++	nop
++	load r12, r8, 0x0, MEM32
++	alu.add r12, r12, 4, 0, 0, 0
++	store r12, r8, 0x0, MEM32
++	load r12, r8, 0x2, MEM_EXT32
++	alu.add r12, r12, 4, 0, 0, 1
++	jump.reg r16, JMP_TASK
++	store r12, r8, 0x2, MEM_EXT32
++	movi r8, 0x12
++	jump rx_recycle, JMP_RECYCLE
++
++.assert_pc 0x02ec
++cpu_tx:
++	movi r10, 0x0
++	movi r11, 0x80
++	alu.mul r10, r10, 8, 0, 0, 1
++	alu.add r10, r11, 10, 0, 0, 0
++	movi r4, 0x1
++	nop
++	load r11, r10, 0x0, MEM32
++	alu.add r11, r11, 4, 0, 0, 0
++	store r11, r10, 0x0, MEM32
++	load r11, r10, 0x2, MEM_EXT32
++	alu.add r11, r11, 4, 0, 0, 1
++	store r11, r10, 0x2, MEM_EXT32
++	load r14, r8, 0x0, MEM64
++	load r12, r8, 0x4, MEM_EXT64
++	load r10, r9, 0x0, MEM32
++	op33 12, 10, 14, 16, 1, 0
++	op09 0x1, 0xec7
++	store r0, r8, 0x2, MEM_EXT32
++
++.assert_pc 0x334
++
++# Fill the rest of the 32 KiB instruction RAM with the documented NOP.
++.pad 0x8000
+--- a/drivers/net/ethernet/broadcom/bcmbca_runner.c
++++ b/drivers/net/ethernet/broadcom/bcmbca_runner.c
+@@ -9,9 +9,12 @@
+  * serializes accesses. Core control requires powered, clocked register banks.
+  */
+ 
++#include <linux/align.h>
+ #include <linux/bits.h>
+ #include <linux/delay.h>
++#include <linux/errno.h>
+ #include <linux/io.h>
++#include <linux/unaligned.h>
+ 
+ #include "bcmbca_runner.h"
+ 
+@@ -39,6 +42,23 @@ void bcmbca_runner_sync(struct bcmbca_ru
+ 	readl(runner->base + runner->data->ctrl);
+ }
+ 
++int bcmbca_runner_load_program(struct bcmbca_runner *runner, u32 offset,
++			       u32 size, u32 reg_size)
++{
++	const struct bcmbca_runner_data *data = runner->data;
++	unsigned int i;
++
++	if (!data->program || !data->program_end ||
++	    size != data->program_end - data->program ||
++	    offset >= reg_size || size > reg_size - offset ||
++	    !IS_ALIGNED(offset, 4) || !IS_ALIGNED(size, 4))
++		return -EINVAL;
++	for (i = 0; i < size; i += 4)
++		iowrite32be(get_unaligned_be32(data->program + i),
++			    runner->base + offset + i);
++	return 0;
++}
++
+ bool bcmbca_runner_reduced_receive(struct bcmbca_runner *runner, u32 *word0,
+ 				   u32 *word1, u32 *word2)
+ {
+--- a/drivers/net/ethernet/broadcom/bcmbca_runner.h
++++ b/drivers/net/ethernet/broadcom/bcmbca_runner.h
+@@ -10,6 +10,8 @@ struct bcmbca_runner_data {
+ 	u32 stride;
+ 	u32 sram;
+ 	unsigned int num_cores;
++	const u8 *program;
++	const u8 *program_end;
+ };
+ 
+ /* SRAM offsets in the reduced program ABI, not fixed hardware registers. */
+@@ -30,6 +32,8 @@ struct bcmbca_runner {
+ 
+ void bcmbca_runner_stop(struct bcmbca_runner *runner);
+ void bcmbca_runner_sync(struct bcmbca_runner *runner);
++int bcmbca_runner_load_program(struct bcmbca_runner *runner, u32 offset,
++			       u32 size, u32 reg_size);
+ 
+ /* These operations require the reduced SRAM packet interface. */
+ bool bcmbca_runner_reduced_receive(struct bcmbca_runner *runner, u32 *word0,
+--- a/drivers/net/ethernet/broadcom/bcmbca_xrdp.c
++++ b/drivers/net/ethernet/broadcom/bcmbca_xrdp.c
+@@ -75,6 +75,8 @@
+ 
+ #include "bcm6846_enet_data.h"
+ 
++extern const u8 bcm6846_runner_start[], bcm6846_runner_end[];
++
+ /* UniMAC/BBH registers, RGMII attachment and Runner TX routing per port. */
+ static const struct bcmbca_xrdp_port_data bcm6846_ports[] = {
+ 	{
+@@ -102,6 +104,8 @@ static const struct bcmbca_xrdp_enet_var
+ 		.stride = 0x1000,
+ 		.sram = 0xc00000,
+ 		.num_cores = 3,
++		.program = bcm6846_runner_start,
++		.program_end = bcm6846_runner_end,
+ 	},
+ 	.reduced = {
+ 		.rx_fifo = 0x800,
+@@ -294,6 +298,12 @@ static int bcmbca_xrdp_hw_init(struct bc
+ 			if (offset != variant->runner.sram || value)
+ 				return -EINVAL;
+ 			break;
++		case 8: /* Assembled program, including instruction RAM NOP padding. */
++			ret = bcmbca_runner_load_program(&enet->runner, offset, value,
++							 variant->reg_size);
++			if (ret)
++				return ret;
++			break;
+ 		default:
+ 			return -EINVAL;
+ 		}
+--- /dev/null
++++ b/drivers/net/ethernet/broadcom/runner-asm/.gitignore
+@@ -0,0 +1,2 @@
++# SPDX-License-Identifier: GPL-2.0-only
++/runner-as
+--- /dev/null
++++ b/drivers/net/ethernet/broadcom/runner-asm/Makefile
+@@ -0,0 +1,6 @@
++# SPDX-License-Identifier: GPL-2.0-only
++hostprogs-always-y := runner-as
++runner-as-objs := main.o symbol.o insn.o parser.tab.o lexer.lex.o
++HOST_EXTRACFLAGS += -I$(src) -I$(obj)
++
++$(obj)/lexer.lex.o: $(obj)/parser.tab.h
+--- /dev/null
++++ b/drivers/net/ethernet/broadcom/runner-asm/README.rst
+@@ -0,0 +1,183 @@
++.. SPDX-License-Identifier: GPL-2.0-only
++
++BCM6846 Runner assembler
++=======================
++
++``runner-as`` builds the reduced BCM6846 SRAM Buffer Pool Manager (SBPM)
++program used by the BCMBCA XRDP Ethernet driver. It uses a flex scanner, bison grammar, symbol table
++and instruction encoder, following the separation used by aic7xxx's
++``aicasm``. It is an independent implementation, without the AIC instruction
++set, conditional patching language or Berkeley DB dependency.
++
++This is an encoding assembler for the supplied single-issue BCM6846 image,
++not a complete description of the Runner ISA or an ACE-compatible assembler.
++The instruction forms below distinguish decoded operands from fields whose
++meaning remains unresolved. In particular, a byte-identical rebuild does
++not establish how to issue a packet notification. Do not use the unresolved
++forms as documented peripheral operations, or assume compatibility with
++the dual-issue Runner in newer SoCs.
++
++Build and test
++--------------
++
++Kbuild builds the host assembler when the Ethernet driver is enabled,
++assembles ``bcm6846_runner.rnr`` and embeds the result through ``.incbin``
++in a read-only ELF data object linked into ``bcmbca-xrdp``. No external
++firmware file is required at runtime. Generated files stay in the kernel
++output directory. A standalone invocation after building is::
++
++  build-codex/drivers/net/ethernet/broadcom/runner-asm/runner-as input.rnr output.bin
++
++Run the host tests from the source tree with::
++
++  python3 drivers/net/ethernet/broadcom/runner-asm/test.py \
++    build-codex/drivers/net/ethernet/broadcom/runner-asm/runner-as
++
++The reference digest is for all 8192 big-endian instruction words, including
++NOP padding, reconstructed from the original U-Boot register-write list::
++
++  924fa9aa8cd5c463a6e913ea7a441f06caad9b1a16b0efb92359245f320d8d6d
++
++The tests also exercise forward/backward labels, independent instruction
++vectors, field bounds, ABI assertions and rejection of malformed programs.
++They do not execute the instructions or simulate the packet engine.
++
++Source language
++---------------
++
++Each instruction occupies four bytes. Labels and ``.`` denote byte
++addresses. ``r0`` through ``r31`` denote register selectors; arithmetic
++expressions can also supply selectors. Constants use ``.const name = expr``.
++Decimal and ``0x`` hexadecimal numbers, parentheses, addition, subtraction,
++left shift, AND and OR are supported. Comments start with ``#``. Statements
++end with a newline; labels end with a colon.
++
++Instruction operands may refer to forward labels. Constants and layout
++directives may only refer to symbols already defined. Expressions and
++fields are range-checked, with no implicit truncation. ``.pad address``
++fills forward with NOPs; ``.assert_pc address`` rejects changes to a fixed
++ABI entry point. The two passes must produce the same symbols and size.
++Output is written atomically only after both passes succeed.
++
++Branch labels are relocated only for the ``branch`` and ``jump`` forms.
++Some unresolved fields may also contain addresses or displacements. The
++current source keeps their positions fixed; it is not generally relocatable.
++The host's recorded context initialization supplies task entry PCs and
++SRAM addresses separately. Changing that ABI requires corresponding host
++changes, not just edits to this assembly file.
++
++Encoding forms
++--------------
++
++Bits 31:26 select the observed instruction class. The table specifies bit
++positions, not C bitfields. All numerical control fields are retained
++explicitly; the assembler does not fill delay slots or schedule hazards.
++
++``nop``
++  The vendor defines ``RNR_NOP_OPCODE`` as ``0xfc000000``.
++
++``movi dst, imm16``
++  ``0xb0000004 | dst << 20 | imm16 << 4``. The observed immediate-move
++  form, including the low control nibble 4. Other move modes are not
++  implemented.
++
++``ld32.abs dst, address`` / ``ld64.abs dst, address``
++  Base ``0x32000002`` / ``0x32000003``, register bits 24:20 and byte
++  address bits 19:4. The 64-bit form transfers an even register pair.
++  ``st32.abs`` / ``st64.abs`` use bases ``0x36000002`` / ``0x36000003``.
++
++``load reg, a, b, mode`` / ``store reg, a, b, mode``
++  Class 0x0c / 0x0d. Register selector 24:20, address field A 19:15,
++  address field B 14:4. Mode bits 3:0 go to instruction bits 3:0;
++  mode bit 4 goes to instruction bit 25. The precise address-generation
++  and extension semantics of these modes remain unresolved. In the
++  source, ``MEM_EXT32`` and ``MEM_EXT64`` name encodings, not a specified
++  memory address space or a guaranteed byte displacement.
++
++``alu.add d, a, b, x, y, m``
++  Class 0x20, d=24:20, a=19:15, b=9:5, x=14:10, y=4:0, m=25.
++  ``alu.sub`` and ``alu.and`` use classes 0x21 and 0x22. These names are
++  inferred from counter increments, the SBPM null-buffer comparison and
++  FIFO pointer masking. The remaining controls are not fully decoded.
++
++``alu.shift`` / ``alu.mul``
++  Classes 0x25 / 0x27, with the same six encoding fields. The shift name
++  is inferred from bit-mask construction in the PON interrupt-coalescing
++  routine and the reduced image's port-index scaling. Multiplication is
++  inferred from counter indices scaled by eight and PON table-address
++  calculations. Shift direction, signedness and other controls remain
++  explicit; these names do not specify every possible mode.
++
++``field.2a`` / ``field.2b``
++  Same six *encoding fields*, with classes 0x2a / 0x2b. These resemble
++  insertion/extraction, but their controls are not sufficiently decoded
++  to expose semantic bit-position and width operands.
++
++``branch target, control`` / ``jump target, control``
++  Class 0x00 / 0x01. Bits 12:0 contain target / 4; bits 25:13 contain
++  control. Branch conditions and delay controls remain explicit. The
++  ``jump.reg reg, control`` form preserves the observed indirect task
++  return encoding, with a five-bit selector in place of the target.
++  Its selector is not a code relocation.
++
++``op02``, ``op30``, ``op31``, ``op33``
++  The same six encoding fields as the ALU forms, with the indicated
++  class number. These fields do **not** imply ALU or register semantics.
++  Class 0x02 appears in control flow; 0x30/0x31 appear in debug/control
++  sequences; 0x33 appears in peripheral exchanges. Message destinations,
++  completion behavior and memory-ordering guarantees remain unresolved.
++
++``op08 control, value`` / ``op09 control, value``
++  Class 0x08 / 0x09. Control occupies bits 25:13 and value bits 12:0.
++  These occur at task/context boundaries. They are not yet specified as
++  context-switch or barrier instructions.
++
++Evidence and limits
++-------------------
++
++The reconstruction uses Broadcom's GPL code supplied with the Genexis
++BCM6846 sources. Paths below are relative to the vendor ``rdp`` directory
++unless stated otherwise:
++
++* U-Boot ``bcmbca/xrdp/data_path_6846.c`` supplies the working image as
++  byte-swapped 32-bit writes following an instruction-RAM NOP fill.
++* ``projects/XRDP_CFE2/firmware_bin/BCM6846/runner_fw_0.c`` supplies a
++  related image with matching initialization and debug sequences.
++* ``projects/XRDP_CFE2/drivers/rdd/BCM6846/rdd_runner_labels.h`` places
++  its initialization at 0x18 and debug routine at 0x7c. The first two
++  vector encodings target exactly these addresses in instruction units.
++* The adjacent ``auto/rdd_runner_defs_auto.h`` places global registers at
++  0x60, the register-save buffer at 0x1c0, and the task index at 0x16c.
++  The load/store operands agree with those addresses. Comparing the debug
++  sequence with the reduced image identifies its buffer at 0x2c0 and
++  task index at 0xec. Register-pair transfers advance the buffer by eight
++  bytes, while the first two single-register transfers advance by four.
++* ``rdd_init.c`` initializes global r1 to 1. The CFE2 counter sequence
++  uses that selector in its addition; the reduced image instead loads
++  r4 with 1 and uses the corresponding changed operand in the same
++  load/add/store sequence. This cross-check supports the move and add
++  register fields independently of reassembly.
++* ``drivers/rdp_subsystem/xrdp/rdp_drv_rnr.c`` defines the NOP and loads
++  instruction words in big-endian order.
++
++The manifests name ``debug.uc``, ``cpu_rx.uc``, ``cpu_tx.uc`` and common
++firmware macros, but matching sources and ACE were not present in the
++examined dump. The older DSL Runner headers contain assembly macros; they
++provide vocabulary, not proof of BCM6846 instruction encodings.
++
++The full Linux PON firmware's host setup supplies 0x82d9708c (UBUS_SLV
++QUEUE_ITR) as the receive interrupt destination. That establishes a
++destination, not a compatible write sequence for this reduced SBPM image.
++In ``projects/PON_6846/firmware_bin/runner_fw_1.c``, the routine labelled
++``interrupt_coalescing_1st_wakeup_request`` starts at 0x67e4. At 0x6804 it
++loads the configured destination from SRAM 0x3628 into r18/r19. A candidate
++notification sequence at 0x6848 stores r8 through r14, followed at 0x684c
++by class 0x35, with fields d=14, a=18, b=4, x=8, y=0, m=1. The sequence
++recurs at 0x688c/0x6890. This suggests an external write of a four-byte
++mask, but the field interpretation and completion rules are not proven.
++It is not an instruction form implemented by this assembler yet.
++
++Peripheral command encodings, descriptor publication ordering and interrupt
++acknowledgment still need investigation and hardware testing. This
++conversion intentionally preserves the original program and polling
++fallback; it does not add packet-generated interrupts.
+--- /dev/null
++++ b/drivers/net/ethernet/broadcom/runner-asm/insn.c
+@@ -0,0 +1,116 @@
++// SPDX-License-Identifier: GPL-2.0-only
++/*
++ * Encoding forms recovered from BCM6846 reduced and CFE2 Runner images.
++ * See README.rst for evidence and the fields whose semantics are unknown.
++ * Use shifts, not C bitfields: the assembler runs on the build host.
++ */
++#include <string.h>
++
++#include "runner.h"
++
++struct field {
++	unsigned int shift;
++	unsigned int bits;
++};
++
++enum format {
++	NORMAL,
++	BRANCH,
++	MEMORY,
++	ABS32,
++	ABS64,
++};
++
++struct opcode {
++	const char *name;
++	uint32_t base;
++	enum format format;
++	unsigned int count;
++	struct field fields[RUNNER_OPERANDS];
++};
++
++#define ALU_FIELDS { { 20, 5 }, { 15, 5 }, { 5, 5 }, { 10, 5 }, { 0, 5 }, { 25, 1 } }
++#define MEM_FIELDS { { 20, 5 }, { 15, 5 }, { 4, 11 } }
++#define ABS_FIELDS { { 20, 5 }, { 4, 16 } }
++
++static const struct opcode opcodes[] = {
++	{ "nop", RUNNER_NOP, NORMAL, 0, { { 0, 0 } } },
++	{ "movi", 0xb0000004, NORMAL, 2, { { 20, 5 }, { 4, 16 } } },
++	{ "ld32.abs", 0x32000002, ABS32, 2, ABS_FIELDS },
++	{ "ld64.abs", 0x32000003, ABS64, 2, ABS_FIELDS },
++	{ "st32.abs", 0x36000002, ABS32, 2, ABS_FIELDS },
++	{ "st64.abs", 0x36000003, ABS64, 2, ABS_FIELDS },
++	{ "load", 0x30000000, MEMORY, 4, MEM_FIELDS },
++	{ "store", 0x34000000, MEMORY, 4, MEM_FIELDS },
++	{ "alu.add", 0x80000000, NORMAL, 6, ALU_FIELDS },
++	{ "alu.sub", 0x84000000, NORMAL, 6, ALU_FIELDS },
++	{ "alu.and", 0x88000000, NORMAL, 6, ALU_FIELDS },
++	{ "alu.shift", 0x94000000, NORMAL, 6, ALU_FIELDS },
++	{ "alu.mul", 0x9c000000, NORMAL, 6, ALU_FIELDS },
++	{ "field.2a", 0xa8000000, NORMAL, 6, ALU_FIELDS },
++	{ "field.2b", 0xac000000, NORMAL, 6, ALU_FIELDS },
++	{ "branch", 0x00000000, BRANCH, 2, { { 0, 13 }, { 13, 13 } } },
++	{ "jump", 0x04000000, BRANCH, 2, { { 0, 13 }, { 13, 13 } } },
++	{ "jump.reg", 0x04000000, NORMAL, 2, { { 0, 5 }, { 13, 13 } } },
++	/* These are encoding names, not claims about operation semantics. */
++	{ "op02", 0x08000000, NORMAL, 6, ALU_FIELDS },
++	{ "op08", 0x20000000, NORMAL, 2, { { 13, 13 }, { 0, 13 } } },
++	{ "op09", 0x24000000, NORMAL, 2, { { 13, 13 }, { 0, 13 } } },
++	{ "op30", 0xc0000000, NORMAL, 6, ALU_FIELDS },
++	{ "op31", 0xc4000000, NORMAL, 6, ALU_FIELDS },
++	{ "op33", 0xcc000000, NORMAL, 6, ALU_FIELDS },
++};
++
++static uint32_t field_value(uint32_t value, struct field field)
++{
++	if (value >= (1U << field.bits))
++		error("operand %#x does not fit %u bits", value, field.bits);
++	return value << field.shift;
++}
++
++void instruction(const char *name, const struct operands *args)
++{
++	const struct opcode *op = NULL;
++	uint32_t word, value;
++	unsigned int i, count;
++
++	for (i = 0; i < sizeof(opcodes) / sizeof(opcodes[0]); i++) {
++		if (!strcmp(name, opcodes[i].name)) {
++			op = &opcodes[i];
++			break;
++		}
++	}
++	if (!op)
++		error("unknown instruction: %s", name);
++	if (args->count != op->count)
++		error("%s needs %u operands", name, op->count);
++	if (pass == 1) {
++		emit(0);
++		return;
++	}
++	word = op->base;
++	count = op->count;
++	if (op->format == MEMORY) {
++		/* Low four mode bits and bit 25 are deliberately explicit. */
++		value = args->value[--count];
++		if (value > 31)
++			error("memory mode exceeds five bits");
++		word |= (value & 15) | ((value >> 4) << 25);
++	}
++	if (op->format == ABS32 || op->format == ABS64) {
++		if (args->value[1] & 3)
++			error("unaligned absolute memory address");
++		if (op->format == ABS64 && (args->value[0] & 1))
++			error("64-bit transfer needs an even register pair");
++	}
++	for (i = 0; i < count; i++) {
++		value = args->value[i];
++		if (op->format == BRANCH && !i) {
++			if ((value & 3) || value >= RUNNER_WORDS * 4)
++				error("unaligned or out-of-range branch target");
++			value /= 4;
++		}
++		word |= field_value(value, op->fields[i]);
++	}
++	emit(word);
++}
+--- /dev/null
++++ b/drivers/net/ethernet/broadcom/runner-asm/lexer.l
+@@ -0,0 +1,38 @@
++/* SPDX-License-Identifier: GPL-2.0-only */
++%option noyywrap nounput noinput yylineno nodefault
++%{
++#include <stdlib.h>
++#include <string.h>
++#include "runner.h"
++#include "parser.tab.h"
++
++/* flex has already advanced yylineno when returning a newline token. */
++#define YY_USER_ACTION \
++	if (yytext[0] != '\n') source_line = yylineno;
++%}
++
++%%
++[ \t\r]+	;
++#[^\n]*	;
++".const"	return CONST;
++".pad"		return PAD;
++".assert_pc"	return ASSERT;
++"<<"		return LSHIFT;
++0x[0-9a-fA-F]+|[0-9]+ {
++		yylval.number = number(yytext);
++		return NUMBER;
++	}
++r[0-9]+ {
++		yylval.number = number(yytext + 1);
++		if (yylval.number > 31)
++			error("register outside r0..r31");
++		return REGISTER;
++	}
++[a-zA-Z_.][a-zA-Z_0-9.]* {
++		yylval.name = alloc(yyleng + 1);
++		memcpy(yylval.name, yytext, yyleng + 1);
++		return NAME;
++	}
++[:,=()+&|\n-]	return yytext[0];
++.		error("unexpected character: %s", yytext);
++%%
+--- /dev/null
++++ b/drivers/net/ethernet/broadcom/runner-asm/main.c
+@@ -0,0 +1,157 @@
++// SPDX-License-Identifier: GPL-2.0-only
++/*
++ * BCM6846 Runner assembler. Like aicasm, keep the scanner, grammar,
++ * symbols and instruction formats separate from output generation.
++ */
++#include <errno.h>
++#include <limits.h>
++#include <stdarg.h>
++#include <stdlib.h>
++#include <string.h>
++#include <unistd.h>
++
++#include "runner.h"
++
++const char *input_name;
++unsigned int pass, pc;
++unsigned int source_line = 1;
++static uint32_t image[RUNNER_WORDS];
++
++void error(const char *fmt, ...)
++{
++	va_list args;
++
++	fprintf(stderr, "%s:%u: ", input_name, source_line);
++	va_start(args, fmt);
++	vfprintf(stderr, fmt, args);
++	va_end(args);
++	fputc('\n', stderr);
++	exit(EXIT_FAILURE);
++}
++
++void *alloc(size_t size)
++{
++	void *ptr = malloc(size);
++
++	if (!ptr)
++		error("out of memory");
++	return ptr;
++}
++
++uint32_t number(const char *text)
++{
++	unsigned long long value;
++	char *end;
++
++	errno = 0;
++	value = strtoull(text, &end, !strncmp(text, "0x", 2) ? 16 : 10);
++	if (errno || *end || value > UINT32_MAX)
++		error("invalid 32-bit number: %s", text);
++	return value;
++}
++
++uint32_t shift_left(uint32_t value, uint32_t shift)
++{
++	if (shift >= 32 || (shift && value > UINT32_MAX >> shift))
++		error("shift overflow");
++	return value << shift;
++}
++
++void emit(uint32_t word)
++{
++	if (pc >= sizeof(image))
++		error("program exceeds instruction RAM");
++	image[pc / 4] = word;
++	pc += 4;
++}
++
++void pad(uint32_t end)
++{
++	if ((end & 3) || end < pc || end > sizeof(image))
++		error("invalid padding address: %#x", end);
++	while (pc < end)
++		emit(RUNNER_NOP);
++}
++
++void assert_pc(uint32_t expected)
++{
++	if (pc != expected)
++		error("ABI address moved: expected %#x, got %#x", expected, pc);
++}
++
++void yyerror(const char *message)
++{
++	error("%s", message);
++}
++
++static void write_image(const char *name)
++{
++	char *temporary = alloc(strlen(name) + sizeof(".XXXXXX"));
++	unsigned int i;
++	FILE *output;
++	int fd;
++	bool failed = false;
++
++	sprintf(temporary, "%s.XXXXXX", name);
++	fd = mkstemp(temporary);
++	if (fd < 0)
++		error("cannot create %s: %s", name, strerror(errno));
++	output = fdopen(fd, "wb");
++	if (!output) {
++		close(fd);
++		unlink(temporary);
++		error("cannot open output stream: %s", strerror(errno));
++	}
++	/* Emit bytes explicitly: neither host nor target endianness matters. */
++	for (i = 0; i < pc / 4; i++) {
++		uint32_t word = image[i];
++		unsigned char bytes[] = { word >> 24, word >> 16, word >> 8, word };
++
++		if (fwrite(bytes, 1, sizeof(bytes), output) != sizeof(bytes)) {
++			failed = true;
++			break;
++		}
++	}
++	if (fclose(output))
++		failed = true;
++	if (failed || rename(temporary, name)) {
++		unlink(temporary);
++		error("cannot write %s", name);
++	}
++	free(temporary);
++}
++
++int main(int argc, char **argv)
++{
++	unsigned int first_size = 0;
++	FILE *input;
++
++	if (argc != 3) {
++		fprintf(stderr, "Usage: %s source output\n", argv[0]);
++		return EXIT_FAILURE;
++	}
++	input_name = argv[1];
++	input = fopen(input_name, "r");
++	if (!input)
++		error("cannot open input: %s", strerror(errno));
++	for (pass = 1; pass <= 2; pass++) {
++		pc = 0;
++		yylineno = 1;
++		source_line = 1;
++		yyrestart(input);
++		if (yyparse() || ferror(input))
++			error("cannot parse input");
++		if (pass == 1) {
++			first_size = pc;
++			if (fseek(input, 0, SEEK_SET))
++				error("cannot rewind input");
++		}
++	}
++	if (!pc || pc != first_size)
++		error("empty program or size changed between passes");
++	fclose(input);
++	write_image(argv[2]);
++	free_symbols();
++	yylex_destroy();
++	return EXIT_SUCCESS;
++}
+--- /dev/null
++++ b/drivers/net/ethernet/broadcom/runner-asm/parser.y
+@@ -0,0 +1,79 @@
++/* SPDX-License-Identifier: GPL-2.0-only */
++%{
++#include <stdlib.h>
++#include <stdint.h>
++#include "runner.h"
++
++/* Forward references are allowed in instructions, not layout directives. */
++static bool resolving;
++%}
++
++%code requires {
++#include "runner.h"
++}
++
++%union {
++	uint32_t number;
++	char *name;
++	struct operands operands;
++}
++
++%token <number> NUMBER REGISTER
++%token <name> NAME
++%token PAD ASSERT CONST LSHIFT
++%type <number> expr
++%type <operands> operands arguments
++%destructor { free($$); } <name>
++%left '|'
++%left '&'
++%left LSHIFT
++%left '+' '-'
++
++%%
++program: %empty | program line;
++line:
++	'\n'
++	| NAME ':' { define_symbol($1, pc); free($1); }
++	| CONST NAME '=' { resolving = true; } expr '\n'
++		{ define_symbol($2, $5); free($2); resolving = false; }
++	| PAD { resolving = true; } expr '\n' { pad($3); resolving = false; }
++	| ASSERT { resolving = true; } expr '\n'
++		{ assert_pc($3); resolving = false; }
++	| NAME arguments '\n' { instruction($1, &$2); free($1); }
++	;
++arguments:
++	%empty { $$.count = 0; }
++	| operands { $$ = $1; }
++	;
++operands:
++	expr { $$.count = 1; $$.value[0] = $1; }
++	| operands ',' expr {
++		$$ = $1;
++		if ($$.count == RUNNER_OPERANDS)
++			error("too many operands");
++		$$.value[$$.count++] = $3;
++	}
++	;
++expr:
++	NUMBER { $$ = $1; }
++	| REGISTER { $$ = $1; }
++	| NAME {
++		$$ = pass == 2 || resolving ? lookup_symbol($1) : 0;
++		free($1);
++	}
++	| '(' expr ')' { $$ = $2; }
++	| expr '+' expr {
++		if ($1 > UINT32_MAX - $3)
++			error("addition overflow");
++		$$ = $1 + $3;
++	}
++	| expr '-' expr {
++		if ((pass == 2 || resolving) && $1 < $3)
++			error("subtraction underflow");
++		$$ = pass == 1 && !resolving ? 0 : $1 - $3;
++	}
++	| expr LSHIFT expr { $$ = shift_left($1, $3); }
++	| expr '&' expr { $$ = $1 & $3; }
++	| expr '|' expr { $$ = $1 | $3; }
++	;
++%%
+--- /dev/null
++++ b/drivers/net/ethernet/broadcom/runner-asm/runner.h
+@@ -0,0 +1,41 @@
++/* SPDX-License-Identifier: GPL-2.0-only */
++#ifndef RUNNER_AS_H
++#define RUNNER_AS_H
++
++#include <stdbool.h>
++#include <stdint.h>
++#include <stdio.h>
++
++#define RUNNER_WORDS 8192
++#define RUNNER_NOP 0xfc000000U
++#define RUNNER_OPERANDS 6
++
++struct operands {
++	unsigned int count;
++	uint32_t value[RUNNER_OPERANDS];
++};
++
++extern const char *input_name;
++extern unsigned int pass, pc;
++extern unsigned int source_line;
++extern int yylineno;
++extern FILE *yyin;
++
++void error(const char *fmt, ...) __attribute__((format(printf, 1, 2), noreturn));
++void *alloc(size_t size);
++uint32_t number(const char *text);
++void define_symbol(const char *name, uint32_t value);
++uint32_t lookup_symbol(const char *name);
++void free_symbols(void);
++void instruction(const char *name, const struct operands *args);
++void emit(uint32_t word);
++void pad(uint32_t end);
++void assert_pc(uint32_t expected);
++uint32_t shift_left(uint32_t value, uint32_t shift);
++int yyparse(void);
++int yylex(void);
++void yyrestart(FILE *input);
++int yylex_destroy(void);
++void yyerror(const char *message);
++
++#endif
+--- /dev/null
++++ b/drivers/net/ethernet/broadcom/runner-asm/symbol.c
+@@ -0,0 +1,71 @@
++// SPDX-License-Identifier: GPL-2.0-only
++/* Symbols are defined in pass one and resolved in pass two. */
++#include <stdlib.h>
++#include <string.h>
++
++#include "runner.h"
++
++struct symbol {
++	struct symbol *next;
++	char *name;
++	uint32_t value;
++};
++
++static struct symbol *symbols;
++
++static struct symbol *find_symbol(const char *name)
++{
++	struct symbol *symbol;
++
++	for (symbol = symbols; symbol; symbol = symbol->next)
++		if (!strcmp(name, symbol->name))
++			return symbol;
++	return NULL;
++}
++
++void define_symbol(const char *name, uint32_t value)
++{
++	struct symbol *symbol = find_symbol(name);
++
++	if (pass == 2) {
++		if (!symbol || symbol->value != value)
++			error("symbol changed between passes: %s", name);
++		return;
++	}
++	if (symbol)
++		error("duplicate symbol: %s", name);
++	/* Register names cannot be redefined. */
++	if (name[0] == 'r' && name[1] >= '0' && name[1] <= '9')
++		error("reserved register name: %s", name);
++	if (!strcmp(name, "."))
++		error("the location counter cannot be redefined");
++	symbol = alloc(sizeof(*symbol));
++	symbol->name = alloc(strlen(name) + 1);
++	strcpy(symbol->name, name);
++	symbol->value = value;
++	symbol->next = symbols;
++	symbols = symbol;
++}
++
++uint32_t lookup_symbol(const char *name)
++{
++	struct symbol *symbol;
++
++	if (!strcmp(name, "."))
++		return pc;
++	symbol = find_symbol(name);
++	if (!symbol)
++		error("undefined symbol: %s", name);
++	return symbol->value;
++}
++
++void free_symbols(void)
++{
++	while (symbols) {
++		struct symbol *next = symbols->next;
++
++		free(symbols->name);
++		free(symbols);
++		symbols = next;
++	}
++}
+--- /dev/null
++++ b/drivers/net/ethernet/broadcom/runner-asm/test.py
+@@ -0,0 +1,125 @@
++#!/usr/bin/env python3
++# SPDX-License-Identifier: GPL-2.0-only
++"""Run with the path to the Kbuild-generated runner-as executable."""
++
++import hashlib
++from pathlib import Path
++import struct
++import subprocess
++import sys
++import tempfile
++import unittest
++
++
++ASSEMBLER = Path(sys.argv.pop(1)).resolve()
++SOURCE = Path(__file__).resolve().parent.parent / "bcm6846_runner.rnr"
++
++
++class AssemblerTest(unittest.TestCase):
++    def assemble(self, source, expected=None, error=None):
++        with tempfile.TemporaryDirectory() as directory:
++            path = Path(directory)
++            (path / "input").write_text(source)
++            result = subprocess.run(
++                [ASSEMBLER, path / "input", path / "output"],
++                capture_output=True, text=True, check=False,
++            )
++            if error:
++                self.assertNotEqual(result.returncode, 0)
++                self.assertIn(error, result.stderr)
++                self.assertFalse((path / "output").exists())
++                return None
++            self.assertEqual(result.returncode, 0, result.stderr)
++            data = (path / "output").read_bytes()
++            if expected is not None:
++                self.assertEqual(data, struct.pack(f">{len(expected)}I", *expected))
++            return data
++
++    def test_vendor_image(self):
++        # Digest of instruction RAM reconstructed independently from the
++        # original initialization writes, including their NOP fill.
++        data = self.assemble(SOURCE.read_text())
++        self.assertEqual(len(data), 32768)
++        self.assertEqual(hashlib.sha256(data).hexdigest(),
++                         "924fa9aa8cd5c463a6e913ea7a441f06ca"
++                         "ad9b1a16b0efb92359245f320d8d6d")
++
++    def test_vendor_vectors(self):
++        self.assemble("jump init, 0x1400\nnop\nnop\n"
++                      "init:\nld32.abs r1, 0x64\nld64.abs r2, 0x68\n",
++                      [0x06800003, 0xfc000000, 0xfc000000,
++                       0x32100642, 0x32200683])
++
++    def test_forward_and_backward_labels(self):
++        self.assemble("first:\njump last, 0x1400\nnop\n"
++                      "last:\njump first, 0x1000\n",
++                      [0x06800002, 0xfc000000, 0x06000000])
++
++    def test_constants_and_expressions(self):
++        self.assemble(".const BASE = 0x1c0\n.const NEXT = BASE + (1 << 2)\n"
++                      "st32.abs r1, NEXT\n"
++                      "movi r31, (0xf000 | 255) & 0xffff\n",
++                      [0x36101c42, 0xb1ff0ff4])
++
++    def test_memory_and_alu(self):
++        self.assemble("load r8, r12, 0, 2\n"
++                      "alu.add r8, r8, r4, 0, 0, 0\n"
++                      "store r8, r12, 0, 2\n"
++                      "load r8, r12, 2, 0x16\n",
++                      [0x30860002, 0x80840080, 0x34860002, 0x32860026])
++
++    def test_padding_and_abi(self):
++        self.assemble("nop\n.pad 16\n.assert_pc 16\n", [0xfc000000] * 4)
++        self.assemble("nop\n.assert_pc 8\n", error="ABI address moved")
++
++    def test_reject_invalid_input(self):
++        cases = [
++            ("jump missing, 0x1400\n", "undefined symbol"),
++            ("a:\na:\nnop\n", "duplicate symbol"),
++            (".const a = b\nb:\nnop\n", "undefined symbol"),
++            ("jump 3, 0x1400\n", "unaligned"),
++            ("jump 32768, 0x1400\n", "out-of-range"),
++            ("jump 0, 8192\n", "does not fit"),
++            ("movi r32, 0\n", "register outside"),
++            ("movi r1, 65536\n", "does not fit"),
++            ("ld32.abs r2, 1\n", "unaligned"),
++            ("ld64.abs r31, 0\n", "even register pair"),
++            ("load r1, r2, 2048, 2\n", "does not fit"),
++            ("load r1, r2, 0, 32\n", "memory mode"),
++            ("alu.add r1, r2, 32, 0, 0, 0\n", "does not fit"),
++            ("alu.add r1, r2, 1, 0, 0, 2\n", "does not fit"),
++            ("nop 1\n", "needs 0 operands"),
++            ("movi r1\n", "needs 2 operands"),
++            ("nop 0, 0, 0, 0, 0, 0, 0\n", "too many operands"),
++            ("bogus\n", "unknown instruction"),
++            ("movi r1, 0x100000000\n", "invalid 32-bit number"),
++            ("movi r1, 0xffffffff + 1\n", "addition overflow"),
++            ("movi r1, 1 << 32\n", "shift overflow"),
++            ("movi r1, 0x80000000 << 1\n", "shift overflow"),
++            ("movi r1, 0 - 1\n", "subtraction underflow"),
++            (".pad 32772\n", "invalid padding"),
++            (".pad 3\n", "invalid padding"),
++            ("nop\n.pad 0\n", "invalid padding"),
++            (".pad 32768\nnop\n", "exceeds instruction RAM"),
++            (".pad 0\n", "empty program"),
++            ("nop @\n", "unexpected character"),
++        ]
++        for source, error in cases:
++            with self.subTest(source=source):
++                self.assemble(source, error=error)
++
++    def test_failed_assembly_preserves_output(self):
++        with tempfile.TemporaryDirectory() as directory:
++            path = Path(directory)
++            (path / "input").write_text("jump missing, 0x1400\n")
++            (path / "output").write_bytes(b"previous output")
++            result = subprocess.run(
++                [ASSEMBLER, path / "input", path / "output"],
++                capture_output=True, check=False,
++            )
++            self.assertNotEqual(result.returncode, 0)
++            self.assertEqual((path / "output").read_bytes(), b"previous output")
++
++
++if __name__ == "__main__":
++    unittest.main()

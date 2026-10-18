@@ -1,0 +1,22 @@
+From 1accb2b596eef48969bcfba1eb3a800e1fed5087 Mon Sep 17 00:00:00 2001
+From: Linus Walleij <linusw@kernel.org>
+Date: Fri, 6 Nov 2026 00:44:01 +0100
+Subject: [PATCH] dt-bindings: i2c: brcmstb: Add power-domains
+
+The BCM6846 I2C controller is powered by the PMB peripheral
+domain. Allow one optional power domain so the SoC device tree can
+describe this dependency.
+
+---
+--- a/Documentation/devicetree/bindings/i2c/brcm,brcmstb-i2c.yaml
++++ b/Documentation/devicetree/bindings/i2c/brcm,brcmstb-i2c.yaml
+@@ -19,6 +19,9 @@ properties:
+       - brcm,brcmstb-i2c
+       - brcm,brcmper-i2c
+ 
++  power-domains:
++    maxItems: 1
++
+   reg:
+     minItems: 1
+     items:

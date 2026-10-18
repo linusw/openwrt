@@ -1,0 +1,104 @@
+From ebb3c891e128b7d3b994aed5c256e9cc70677b31 Mon Sep 17 00:00:00 2001
+From: Linus Walleij <linusw@kernel.org>
+Date: Mon, 19 Oct 2026 15:44:32 +0200
+Subject: [PATCH] ARM: dts: broadcom: Add BCM6846 PMB clocks and hardware
+ monitoring
+
+Describe the PMC complex and its PMB interface, including clock, reset
+and hwmon child nodes. Supply the PMB clock controller with
+its 50 MHz reference and connect PVTMON to its clock and reset
+resources. Add a SoC thermal zone referencing the sensor child with a
+one-second polling interval.
+
+Leave trip points and cooling maps unspecified because the available
+BCM6846 documentation does not establish suitable temperature limits.
+
+Describe the PMB power controller child for the SoC power domains.
+
+Signed-off-by: Linus Walleij <linusw@kernel.org>
+
+---
+--- a/arch/arm/boot/dts/broadcom/bcm6846.dtsi
++++ b/arch/arm/boot/dts/broadcom/bcm6846.dtsi
+@@ -3,8 +3,11 @@
+  * Copyright 2022 Broadcom Ltd.
+  */
+ 
++#include <dt-bindings/clock/brcm,bcm6846-pmb.h>
+ #include <dt-bindings/interrupt-controller/arm-gic.h>
+ #include <dt-bindings/interrupt-controller/irq.h>
++#include <dt-bindings/reset/brcm,bcm6846-pmb.h>
++#include <dt-bindings/power/brcm,bcm6846-pmb.h>
+ 
+ / {
+ 	compatible = "brcm,bcm6846", "brcm,bcmbca";
+@@ -57,6 +60,12 @@
+ 	};
+ 
+ 	clocks: clocks {
++		osc50m: clock-50mhz {
++			compatible = "fixed-clock";
++			#clock-cells = <0>;
++			clock-frequency = <50000000>;
++		};
++
+ 		periph_clk: periph-clk {
+ 			compatible = "fixed-clock";
+ 			#clock-cells = <0>;
+@@ -75,6 +84,14 @@
+ 		method = "smc";
+ 	};
+ 
++	thermal-zones {
++		soc_thermal: soc-thermal {
++			polling-delay-passive = <1000>;
++			polling-delay = <1000>;
++			thermal-sensors = <&pvtmon>;
++		};
++	};
++
+ 	axi@81000000 {
+ 		compatible = "simple-bus";
+ 		#address-cells = <1>;
+@@ -263,5 +280,41 @@
+ 			clock-names = "apb_pclk";
+ 			#dma-cells = <2>;
+ 		};
++
++		pmc: system-controller@300000 {
++			compatible = "brcm,bcm6846-pmc", "simple-mfd";
++			ranges = <0x0 0x300000 0x21000>;
++			#address-cells = <1>;
++			#size-cells = <1>;
++
++			pmb: bus@20100 {
++				compatible = "brcm,bcm6846-pmb";
++				reg = <0x20100 0x200>;
++
++				pmb_power: power-controller {
++					compatible = "brcm,bcm6846-pmb-power";
++					#power-domain-cells = <1>;
++				};
++
++				pmb_clk: clock-controller {
++					compatible = "brcm,bcm6846-pmb-clock";
++					clocks = <&osc50m>;
++					clock-names = "ref";
++					#clock-cells = <1>;
++				};
++
++				pmb_reset: reset-controller {
++					compatible = "brcm,bcm6846-pmb-reset";
++					#reset-cells = <1>;
++				};
++
++				pvtmon: hwmon {
++					compatible = "brcm,bcm6846-pmb-pvtmon";
++					clocks = <&pmb_clk BCM6846_CLK_PVTMON>;
++					resets = <&pmb_reset BCM6846_RESET_PVTMON>;
++					#thermal-sensor-cells = <0>;
++				};
++			};
++		};
+ 	};
+ };

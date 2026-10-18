@@ -1,0 +1,36 @@
+From ff41004e0071d4a85ece933f8514aa887b8b2c44 Mon Sep 17 00:00:00 2001
+From: Linus Walleij <linusw@kernel.org>
+Date: Tue, 13 Oct 2026 11:46:36 +0200
+Subject: [PATCH] ARM: dts: broadcom: Correct the XG6846B NAND partition layout
+
+Extend the image partition to 0x0ff80000, leaving the final four 128 KiB
+eraseblocks for the NAND bad block tables. This matches the layout used
+by the OpenWrt images. Protect the full 4 MiB loader partition against
+writes and use standard partition node names.
+
+Signed-off-by: Linus Walleij <linusw@kernel.org>
+
+---
+--- a/arch/arm/boot/dts/broadcom/bcm6846-genexis-xg6846b.dts
++++ b/arch/arm/boot/dts/broadcom/bcm6846-genexis-xg6846b.dts
+@@ -231,15 +231,16 @@
+ 		#address-cells = <1>;
+ 		#size-cells = <1>;
+ 
+-		loader@0 {
++		partition@0 {
+ 			label = "loader";
+ 			reg = <0x00000000 0x00400000>;
++			read-only;
+ 		};
+-		image@400000 {
++		partition@400000 {
+ 			label = "image";
+-			reg = <0x00400000 0x0fb00000>;
++			reg = <0x00400000 0x0fb80000>;
+ 		};
+-		/* 0x00ff0000-0x00ffffff: bad block list */
++		/* 0x0ff80000-0x0fffffff: bad block tables */
+ 	};
+ };
+ 

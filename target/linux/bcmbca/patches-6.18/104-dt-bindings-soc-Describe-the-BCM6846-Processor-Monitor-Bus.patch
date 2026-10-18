@@ -1,0 +1,373 @@
+From 6dd1b02dc1e163bb92360fddbe88c8468c0fca6c Mon Sep 17 00:00:00 2001
+From: Linus Walleij <linusw@kernel.org>
+Date: Tue, 13 Oct 2026 22:09:44 +0200
+Subject: [PATCH] dt-bindings: soc: Describe the BCM6846 Power Management Bus
+
+The third generation Power Management Controller (PMC3) accesses SoC
+block control and reset registers through the Power Management Bus
+(PMB). Describe the BCM6846 PMB and its child controllers.
+
+Add bindings for the power, clock, reset and PVTMON child controllers,
+and headers defining their clock, reset and power-domain IDs. Include
+the combined XRDP, Runner and WAN power domain and the zero-cell PVTMON
+thermal sensor.
+
+Signed-off-by: Linus Walleij <linusw@kernel.org>
+
+---
+--- /dev/null
++++ b/Documentation/devicetree/bindings/clock/brcm,bcm6846-pmb-clock.yaml
+@@ -0,0 +1,39 @@
++# SPDX-License-Identifier: (GPL-2.0-only OR BSD-2-Clause)
++%YAML 1.2
++---
++$id: http://devicetree.org/schemas/clock/brcm,bcm6846-pmb-clock.yaml#
++$schema: http://devicetree.org/meta-schemas/core.yaml#
++
++title: Broadcom BCM6846 PMB clocks
++
++maintainers:
++  - Linus Walleij <linusw@kernel.org>
++
++description:
++  The Power Management Bus (PMB) provides access to the RDP and BIU PLL
++  outputs, the Runner clock, the crystal output, the PVTMON acquisition
++  clock and the clock gates in block power-control zones. Clock indices
++  are defined in dt-bindings/clock/brcm,bcm6846-pmb.h.
++  The PLLs and crystal output use a 50 MHz reference clock.
++  Zone clocks require their associated blocks to be powered.
++
++properties:
++  compatible:
++    const: brcm,bcm6846-pmb-clock
++
++  clocks:
++    maxItems: 1
++
++  clock-names:
++    const: ref
++
++  '#clock-cells':
++    const: 1
++
++required:
++  - compatible
++  - clocks
++  - clock-names
++  - '#clock-cells'
++
++additionalProperties: false
+--- /dev/null
++++ b/Documentation/devicetree/bindings/hwmon/brcm,bcm6846-pmb-pvtmon.yaml
+@@ -0,0 +1,42 @@
++# SPDX-License-Identifier: (GPL-2.0-only OR BSD-2-Clause)
++%YAML 1.2
++---
++$id: http://devicetree.org/schemas/hwmon/brcm,bcm6846-pmb-pvtmon.yaml#
++$schema: http://devicetree.org/meta-schemas/core.yaml#
++
++title: Broadcom BCM6846 PMB process, voltage and temperature monitor
++
++maintainers:
++  - Linus Walleij <linusw@kernel.org>
++
++description:
++  The process, voltage and temperature monitor (PVTMON) is a child of
++  the Power Management Bus (PMB) controller and uses its indirect
++  register interface. It measures die temperature and seven voltages,
++  including a diagnostic test input.
++
++allOf:
++  - $ref: /schemas/thermal/thermal-sensor.yaml#
++
++properties:
++  compatible:
++    const: brcm,bcm6846-pmb-pvtmon
++
++  clocks:
++    maxItems: 1
++    description: PVTMON acquisition clock
++
++  resets:
++    maxItems: 1
++    description: PVTMON analog-acquisition reset
++
++  '#thermal-sensor-cells':
++    const: 0
++
++required:
++  - compatible
++  - clocks
++  - resets
++  - '#thermal-sensor-cells'
++
++unevaluatedProperties: false
+--- /dev/null
++++ b/Documentation/devicetree/bindings/power/brcm,bcm6846-pmb-power.yaml
+@@ -0,0 +1,44 @@
++# SPDX-License-Identifier: (GPL-2.0-only OR BSD-2-Clause)
++%YAML 1.2
++---
++$id: http://devicetree.org/schemas/power/brcm,bcm6846-pmb-power.yaml#
++$schema: http://devicetree.org/meta-schemas/core.yaml#
++
++title: Broadcom BCM6846 Power Management Bus power controller
++
++maintainers:
++  - Linus Walleij <linusw@kernel.org>
++
++description: |
++  The power controller is a child of the Power Management Bus (PMB)
++  controller and accesses BPCM power zones through the parent regmap.
++  A domain includes all power zones of a block. The XRDP domain groups
++  XRDP, its three Runner cores and WAN, matching the vendor power sequence.
++
++  Domain IDs are defined in dt-bindings/power/brcm,bcm6846-pmb.h:
++    BCM6846_PD_PERIPH: peripheral block (bus 0, device 0, four zones)
++    BCM6846_PD_MEMC: memory controller (bus 1, device 8, one zone)
++    BCM6846_PD_USB20: USB 2.0 (bus 1, device 10, four zones)
++    BCM6846_PD_XRDP: XRDP (bus 1, device 12, three zones), Runner cores
++      (bus 1, devices 14, 15 and 16, one zone each) and WAN
++      (bus 1, device 11, three zones)
++    BCM6846_PD_PCIE0: PCIe 0 (bus 0, device 18, one zone)
++    BCM6846_PD_PCIE1: PCIe 1 (bus 0, device 19, one zone)
++
++  Peripheral and memory domains remain powered because they provide
++  resources required for system operation. CPU and PLL blocks use different
++  register layouts and are outside the scope of this provider.
++
++properties:
++  compatible:
++    const: brcm,bcm6846-pmb-power
++
++  '#power-domain-cells':
++    const: 1
++    description: Power domain ID from dt-bindings/power/brcm,bcm6846-pmb.h
++
++required:
++  - compatible
++  - '#power-domain-cells'
++
++additionalProperties: false
+--- /dev/null
++++ b/Documentation/devicetree/bindings/reset/brcm,bcm6846-pmb-reset.yaml
+@@ -0,0 +1,31 @@
++# SPDX-License-Identifier: (GPL-2.0-only OR BSD-2-Clause)
++%YAML 1.2
++---
++$id: http://devicetree.org/schemas/reset/brcm,bcm6846-pmb-reset.yaml#
++$schema: http://devicetree.org/meta-schemas/core.yaml#
++
++title: Broadcom BCM6846 Power Management Bus reset controller
++
++maintainers:
++  - Linus Walleij <linusw@kernel.org>
++
++description:
++  The reset controller is a child of the Power Management Bus (PMB)
++  controller and uses its indirect register interface.
++
++  Each reset specifier identifies a logical reset group, which may span
++  several blocks that must be reset together.
++
++properties:
++  compatible:
++    const: brcm,bcm6846-pmb-reset
++
++  '#reset-cells':
++    const: 1
++    description: Reset group ID from dt-bindings/reset/brcm,bcm6846-pmb.h
++
++required:
++  - compatible
++  - '#reset-cells'
++
++additionalProperties: false
+--- /dev/null
++++ b/Documentation/devicetree/bindings/soc/bcm/brcm,bcm6846-pmb.yaml
+@@ -0,0 +1,90 @@
++# SPDX-License-Identifier: (GPL-2.0-only OR BSD-2-Clause)
++%YAML 1.2
++---
++$id: http://devicetree.org/schemas/soc/bcm/brcm,bcm6846-pmb.yaml#
++$schema: http://devicetree.org/meta-schemas/core.yaml#
++
++title: Broadcom BCM6846 Power Management Bus
++
++maintainers:
++  - Linus Walleij <linusw@kernel.org>
++
++description:
++  The Power Management Bus (PMB) connects the third generation Power
++  Management Controller (PMC3) to the control registers of miscellaneous
++  independent hardware blocks.
++
++  The controller provides configuration, arbitration and four keyhole
++  interfaces for indirect register access.
++
++  Child nodes describe independent hardware blocks accessed over the PMB.
++  These provide global resources and even resources for each other.
++
++properties:
++  compatible:
++    const: brcm,bcm6846-pmb
++
++  reg:
++    maxItems: 1
++    description: PMB configuration, keyhole and address mapping registers
++
++  power-controller:
++    type: object
++    $ref: /schemas/power/brcm,bcm6846-pmb-power.yaml#
++
++  clock-controller:
++    type: object
++    $ref: /schemas/clock/brcm,bcm6846-pmb-clock.yaml#
++
++  reset-controller:
++    type: object
++    $ref: /schemas/reset/brcm,bcm6846-pmb-reset.yaml#
++
++  hwmon:
++    type: object
++    $ref: /schemas/hwmon/brcm,bcm6846-pmb-pvtmon.yaml#
++
++required:
++  - compatible
++  - reg
++  - power-controller
++  - clock-controller
++  - reset-controller
++  - hwmon
++
++additionalProperties: false
++
++examples:
++  - |
++    #include <dt-bindings/clock/brcm,bcm6846-pmb.h>
++    #include <dt-bindings/reset/brcm,bcm6846-pmb.h>
++
++    /* Power Management Bus */
++    bus@ffb20100 {
++        compatible = "brcm,bcm6846-pmb";
++        reg = <0xffb20100 0x200>;
++
++        pmb_clk: clock-controller {
++            compatible = "brcm,bcm6846-pmb-clock";
++            clocks = <&osc50m>;
++            clock-names = "ref";
++            #clock-cells = <1>;
++        };
++
++        hwmon {
++            compatible = "brcm,bcm6846-pmb-pvtmon";
++            clocks = <&pmb_clk BCM6846_CLK_PVTMON>;
++            resets = <&pmb_reset BCM6846_RESET_PVTMON>;
++            #thermal-sensor-cells = <0>;
++        };
++
++        power-controller {
++            compatible = "brcm,bcm6846-pmb-power";
++            #power-domain-cells = <1>;
++        };
++
++        pmb_reset: reset-controller {
++            compatible = "brcm,bcm6846-pmb-reset";
++            #reset-cells = <1>;
++        };
++    };
+--- a/MAINTAINERS
++++ b/MAINTAINERS
+@@ -4955,6 +4955,18 @@ N:	bcm[9]?6856
+ N:	bcm[9]?6858
+ N:	bcm[9]?6878
+ 
++BROADCOM BCMBCA PMC3 PMB DRIVER
++M:	Linus Walleij <linusw@kernel.org>
++S:	Maintained
++F:	Documentation/devicetree/bindings/clock/brcm,bcm6846-pmb-clock.yaml
++F:	Documentation/devicetree/bindings/hwmon/brcm,bcm6846-pmb-pvtmon.yaml
++F:	Documentation/devicetree/bindings/power/brcm,bcm6846-pmb-power.yaml
++F:	Documentation/devicetree/bindings/reset/brcm,bcm6846-pmb-reset.yaml
++F:	Documentation/devicetree/bindings/soc/bcm/brcm,bcm6846-pmb.yaml
++F:	include/dt-bindings/clock/brcm,bcm6846-pmb.h
++F:	include/dt-bindings/power/brcm,bcm6846-pmb.h
++F:	include/dt-bindings/reset/brcm,bcm6846-pmb.h
++
+ BROADCOM BDC DRIVER
+ M:	Justin Chen <justin.chen@broadcom.com>
+ M:	Al Cooper <alcooperx@gmail.com>
+--- /dev/null
++++ b/include/dt-bindings/clock/brcm,bcm6846-pmb.h
+@@ -0,0 +1,42 @@
++/* SPDX-License-Identifier: (GPL-2.0-only OR BSD-2-Clause) */
++#ifndef _DT_BINDINGS_CLOCK_BRCM_BCM6846_PMB_H
++#define _DT_BINDINGS_CLOCK_BRCM_BCM6846_PMB_H
++
++#define BCM6846_CLK_RDPPLL_CH0	0
++#define BCM6846_CLK_RDPPLL_CH1	1
++#define BCM6846_CLK_RDPPLL_CH2	2
++#define BCM6846_CLK_RDPPLL_CH3	3
++#define BCM6846_CLK_RDPPLL_CH4	4
++#define BCM6846_CLK_RDPPLL_CH5	5
++#define BCM6846_CLK_BIUPLL_CH0	6
++#define BCM6846_CLK_BIUPLL_CH1	7
++#define BCM6846_CLK_BIUPLL_CH2	8
++#define BCM6846_CLK_BIUPLL_CH3	9
++#define BCM6846_CLK_BIUPLL_CH4	10
++#define BCM6846_CLK_BIUPLL_CH5	11
++#define BCM6846_CLK_RUNNER	12
++#define BCM6846_CLK_XTAL_OUT	13
++#define BCM6846_CLK_PVTMON	14
++#define BCM6846_CLK_PERIPH_ZONE0	15
++#define BCM6846_CLK_PERIPH_ZONE1	16
++#define BCM6846_CLK_PERIPH_ZONE2	17
++#define BCM6846_CLK_PERIPH_ZONE3	18
++#define BCM6846_CLK_MEMC		19
++#define BCM6846_CLK_USB_ZONE0	20
++#define BCM6846_CLK_USB_ZONE1	21
++#define BCM6846_CLK_USB_ZONE2	22
++#define BCM6846_CLK_USB_ZONE3	23
++#define BCM6846_CLK_WAN_ZONE0	24
++#define BCM6846_CLK_WAN_ZONE1	25
++#define BCM6846_CLK_WAN_ZONE2	26
++#define BCM6846_CLK_XRDP_ZONE0	27
++#define BCM6846_CLK_XRDP_ZONE1	28
++#define BCM6846_CLK_XRDP_ZONE2	29
++#define BCM6846_CLK_RUNNER0	30
++#define BCM6846_CLK_RUNNER1	31
++#define BCM6846_CLK_RUNNER2	32
++#define BCM6846_CLK_PCIE0		33
++#define BCM6846_CLK_PCIE1		34
++#define BCM6846_CLK_BIU		35
++
++#endif
+--- /dev/null
++++ b/include/dt-bindings/power/brcm,bcm6846-pmb.h
+@@ -0,0 +1,12 @@
++/* SPDX-License-Identifier: (GPL-2.0-only OR BSD-2-Clause) */
++#ifndef _DT_BINDINGS_POWER_BCM6846_PMB_H
++#define _DT_BINDINGS_POWER_BCM6846_PMB_H
++
++#define BCM6846_PD_PERIPH	0
++#define BCM6846_PD_MEMC		1
++#define BCM6846_PD_USB20		2
++#define BCM6846_PD_XRDP		3
++#define BCM6846_PD_PCIE0		4
++#define BCM6846_PD_PCIE1		5
++
++#endif
+--- /dev/null
++++ b/include/dt-bindings/reset/brcm,bcm6846-pmb.h
+@@ -0,0 +1,11 @@
++/* SPDX-License-Identifier: (GPL-2.0-only OR BSD-2-Clause) */
++#ifndef _DT_BINDINGS_RESET_BRCM_BCM6846_PMB_H
++#define _DT_BINDINGS_RESET_BRCM_BCM6846_PMB_H
++
++/* XRDP packet engine and its three Runner cores. */
++#define BCM6846_RESET_XRDP	0
++
++/* Process, voltage and temperature monitor analog acquisition reset. */
++#define BCM6846_RESET_PVTMON	1
++
++#endif

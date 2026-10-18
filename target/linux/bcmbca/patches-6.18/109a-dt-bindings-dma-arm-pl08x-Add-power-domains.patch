@@ -1,0 +1,22 @@
+From 468adf983270cf35484a3efae97d2554e67d372c Mon Sep 17 00:00:00 2001
+From: Linus Walleij <linusw@kernel.org>
+Date: Fri, 6 Nov 2026 00:44:01 +0100
+Subject: [PATCH] dt-bindings: dma: arm-pl08x: Add power-domains
+
+The BCM6846 PL081 DMA controller is powered by the PMB peripheral
+domain. Allow one optional power domain so the SoC device tree can
+describe this dependency.
+
+---
+--- a/Documentation/devicetree/bindings/dma/arm-pl08x.yaml
++++ b/Documentation/devicetree/bindings/dma/arm-pl08x.yaml
+@@ -37,6 +37,9 @@ properties:
+           - const: arm,pl080
+           - const: arm,primecell
+ 
++  power-domains:
++    maxItems: 1
++
+   reg:
+     maxItems: 1
+     description: Address range of the PL08x registers

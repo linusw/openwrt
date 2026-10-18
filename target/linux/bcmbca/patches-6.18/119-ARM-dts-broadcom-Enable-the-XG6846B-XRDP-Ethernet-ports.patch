@@ -1,0 +1,100 @@
+From f4af232b0eb27d56b2a331da0fc37f066fd7374f Mon Sep 17 00:00:00 2001
+From: Linus Walleij <linusw@kernel.org>
+Date: Tue, 13 Oct 2026 11:46:36 +0200
+Subject: [PATCH] ARM: dts: broadcom: Enable the XG6846B XRDP Ethernet ports
+
+Enable the shared XRDP controller and all five UniMAC ports. Connect
+UniMAC0 through UniMAC3 to the internal PHYs for LAN1 through LAN4.
+Configure UniMAC4 for a fixed gigabit RGMII link to the Marvell switch,
+with both delays supplied by the switch.
+
+Describe the primary factory MAC address as a fixed-layout mac-base cell
+in the loader partition. The vendor NVRAM starts at 0x10580 and stores
+ucaBaseMacAddr at offset 0x120, placing the cell at 0x106a0. Assign indices
+0 through 4 to the XRDP ports; DSA ports inherit the conduit address.
+This supplies factory addresses before network interface registration.
+
+The fixed cell reads the primary address only; it does not implement
+whole-NVRAM CRC validation or mirror recovery.
+
+Signed-off-by: Linus Walleij <linusw@kernel.org>
+
+---
+--- a/arch/arm/boot/dts/broadcom/bcm6846-genexis-xg6846b.dts
++++ b/arch/arm/boot/dts/broadcom/bcm6846-genexis-xg6846b.dts
+@@ -76,6 +76,55 @@
+ 	clocks = <&osc50m>;
+ };
+ 
++&ethernet {
++	status = "okay";
++};
++
++&gmac0 {
++	nvmem-cells = <&macaddr_loader_106a0 0>;
++	nvmem-cell-names = "mac-address";
++	label = "lan1";
++	phy-handle = <&phy1>;
++	status = "okay";
++};
++
++&gmac1 {
++	nvmem-cells = <&macaddr_loader_106a0 1>;
++	nvmem-cell-names = "mac-address";
++	label = "lan2";
++	phy-handle = <&phy2>;
++	status = "okay";
++};
++
++&gmac2 {
++	nvmem-cells = <&macaddr_loader_106a0 2>;
++	nvmem-cell-names = "mac-address";
++	label = "lan3";
++	phy-handle = <&phy3>;
++	status = "okay";
++};
++
++&gmac3 {
++	nvmem-cells = <&macaddr_loader_106a0 3>;
++	nvmem-cell-names = "mac-address";
++	label = "lan4";
++	phy-handle = <&phy4>;
++	status = "okay";
++};
++
++&gmac4 {
++	nvmem-cells = <&macaddr_loader_106a0 4>;
++	nvmem-cell-names = "mac-address";
++	/* The switch supplies the RGMII delays. */
++	phy-mode = "rgmii-id";
++	status = "okay";
++
++	fixed-link {
++		speed = <1000>;
++		full-duplex;
++	};
++};
++
+ &gpio0 {
+ 	status = "okay";
+ };
+@@ -235,6 +284,19 @@
+ 			label = "loader";
+ 			reg = <0x00000000 0x00400000>;
+ 			read-only;
++
++			nvmem-layout {
++				compatible = "fixed-layout";
++				#address-cells = <1>;
++				#size-cells = <1>;
++
++				/* CFE NVRAM at 0x10580, ucaBaseMacAddr at 0x120. */
++				macaddr_loader_106a0: macaddr@106a0 {
++					compatible = "mac-base";
++					reg = <0x106a0 0x6>;
++					#nvmem-cell-cells = <1>;
++				};
++			};
+ 		};
+ 		partition@400000 {
+ 			label = "image";

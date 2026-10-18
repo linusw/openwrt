@@ -1,0 +1,143 @@
+From 3b445f1af18eff57e8b0c1a05e443bf3ef067bf6 Mon Sep 17 00:00:00 2001
+From: Linus Walleij <linusw@kernel.org>
+Date: Tue, 20 Oct 2026 11:56:15 +0200
+Subject: [PATCH] ARM: dts: broadcom: Describe the BCM6846 XRDP Ethernet
+ controller
+
+Describe the shared XRDP Ethernet controller, its PMB clocks and reset,
+and all five UniMAC ports in the BCM6846 SoC device tree. Add Ethernet
+aliases for the ports and keep the controller and ports disabled by
+default. Boards supply PHY connections, port labels and RGMII link
+settings when enabling them.
+
+Describe the 32 Runner queue interrupts on GIC SPIs 128 through 159
+and the Free Pool Manager interrupt on SPI 160.
+
+Connect the controller to the combined PMB XRDP power domain.
+
+Signed-off-by: Linus Walleij <linusw@kernel.org>
+
+---
+--- a/arch/arm/boot/dts/broadcom/bcm6846.dtsi
++++ b/arch/arm/boot/dts/broadcom/bcm6846.dtsi
+@@ -16,6 +16,14 @@
+ 
+ 	interrupt-parent = <&gic>;
+ 
++	aliases {
++		ethernet0 = &gmac0;
++		ethernet1 = &gmac1;
++		ethernet2 = &gmac2;
++		ethernet3 = &gmac3;
++		ethernet4 = &gmac4;
++	};
++
+ 	cpus {
+ 		#address-cells = <1>;
+ 		#size-cells = <0>;
+@@ -110,6 +118,105 @@
+ 		};
+ 	};
+ 
++	ethernet: ethernet@82000000 {
++		compatible = "brcm,bcm6846-enet", "brcm,bcmbca-xrdp-enet";
++		reg = <0x82000000 0x1000000>;
++		interrupts = <GIC_SPI 128 IRQ_TYPE_LEVEL_HIGH>,
++			     <GIC_SPI 129 IRQ_TYPE_LEVEL_HIGH>,
++			     <GIC_SPI 130 IRQ_TYPE_LEVEL_HIGH>,
++			     <GIC_SPI 131 IRQ_TYPE_LEVEL_HIGH>,
++			     <GIC_SPI 132 IRQ_TYPE_LEVEL_HIGH>,
++			     <GIC_SPI 133 IRQ_TYPE_LEVEL_HIGH>,
++			     <GIC_SPI 134 IRQ_TYPE_LEVEL_HIGH>,
++			     <GIC_SPI 135 IRQ_TYPE_LEVEL_HIGH>,
++			     <GIC_SPI 136 IRQ_TYPE_LEVEL_HIGH>,
++			     <GIC_SPI 137 IRQ_TYPE_LEVEL_HIGH>,
++			     <GIC_SPI 138 IRQ_TYPE_LEVEL_HIGH>,
++			     <GIC_SPI 139 IRQ_TYPE_LEVEL_HIGH>,
++			     <GIC_SPI 140 IRQ_TYPE_LEVEL_HIGH>,
++			     <GIC_SPI 141 IRQ_TYPE_LEVEL_HIGH>,
++			     <GIC_SPI 142 IRQ_TYPE_LEVEL_HIGH>,
++			     <GIC_SPI 143 IRQ_TYPE_LEVEL_HIGH>,
++			     <GIC_SPI 144 IRQ_TYPE_LEVEL_HIGH>,
++			     <GIC_SPI 145 IRQ_TYPE_LEVEL_HIGH>,
++			     <GIC_SPI 146 IRQ_TYPE_LEVEL_HIGH>,
++			     <GIC_SPI 147 IRQ_TYPE_LEVEL_HIGH>,
++			     <GIC_SPI 148 IRQ_TYPE_LEVEL_HIGH>,
++			     <GIC_SPI 149 IRQ_TYPE_LEVEL_HIGH>,
++			     <GIC_SPI 150 IRQ_TYPE_LEVEL_HIGH>,
++			     <GIC_SPI 151 IRQ_TYPE_LEVEL_HIGH>,
++			     <GIC_SPI 152 IRQ_TYPE_LEVEL_HIGH>,
++			     <GIC_SPI 153 IRQ_TYPE_LEVEL_HIGH>,
++			     <GIC_SPI 154 IRQ_TYPE_LEVEL_HIGH>,
++			     <GIC_SPI 155 IRQ_TYPE_LEVEL_HIGH>,
++			     <GIC_SPI 156 IRQ_TYPE_LEVEL_HIGH>,
++			     <GIC_SPI 157 IRQ_TYPE_LEVEL_HIGH>,
++			     <GIC_SPI 158 IRQ_TYPE_LEVEL_HIGH>,
++			     <GIC_SPI 159 IRQ_TYPE_LEVEL_HIGH>,
++			     <GIC_SPI 160 IRQ_TYPE_LEVEL_HIGH>;
++		interrupt-names = "queue0", "queue1", "queue2", "queue3",
++				  "queue4", "queue5", "queue6", "queue7",
++				  "queue8", "queue9", "queue10", "queue11",
++				  "queue12", "queue13", "queue14", "queue15",
++				  "queue16", "queue17", "queue18", "queue19",
++				  "queue20", "queue21", "queue22", "queue23",
++				  "queue24", "queue25", "queue26", "queue27",
++				  "queue28", "queue29", "queue30", "queue31",
++				  "fpm";
++		clocks = <&pmb_clk BCM6846_CLK_RUNNER>,
++			 <&pmb_clk BCM6846_CLK_XRDP_ZONE0>,
++			 <&pmb_clk BCM6846_CLK_XRDP_ZONE1>,
++			 <&pmb_clk BCM6846_CLK_XRDP_ZONE2>,
++			 <&pmb_clk BCM6846_CLK_RUNNER0>,
++			 <&pmb_clk BCM6846_CLK_RUNNER1>,
++			 <&pmb_clk BCM6846_CLK_RUNNER2>,
++			 <&pmb_clk BCM6846_CLK_WAN_ZONE0>,
++			 <&pmb_clk BCM6846_CLK_WAN_ZONE1>,
++			 <&pmb_clk BCM6846_CLK_WAN_ZONE2>;
++		clock-names = "runner", "xrdp-zone0", "xrdp-zone1", "xrdp-zone2",
++			      "runner0", "runner1", "runner2",
++			      "wan-zone0", "wan-zone1", "wan-zone2";
++		power-domains = <&pmb_power BCM6846_PD_XRDP>;
++		resets = <&pmb_reset BCM6846_RESET_XRDP>;
++		status = "disabled";
++
++		ethernet-ports {
++			#address-cells = <1>;
++			#size-cells = <0>;
++
++			gmac0: ethernet@0 {
++				reg = <0>;
++				phy-mode = "gmii";
++				status = "disabled";
++			};
++
++			gmac1: ethernet@1 {
++				reg = <1>;
++				phy-mode = "gmii";
++				status = "disabled";
++			};
++
++			gmac2: ethernet@2 {
++				reg = <2>;
++				phy-mode = "gmii";
++				status = "disabled";
++			};
++
++			gmac3: ethernet@3 {
++				reg = <3>;
++				phy-mode = "gmii";
++				status = "disabled";
++			};
++
++			gmac4: ethernet@4 {
++				reg = <4>;
++				/* Boards must select the appropriate RGMII delay mode. */
++				phy-mode = "rgmii";
++				status = "disabled";
++			};
++		};
++	};
++
+ 	bus@ff800000 {
+ 		compatible = "simple-bus";
+ 		#address-cells = <1>;

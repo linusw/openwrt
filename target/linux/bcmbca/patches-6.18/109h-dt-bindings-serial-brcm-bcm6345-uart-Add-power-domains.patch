@@ -1,0 +1,22 @@
+From e76be3433fa055f52fcb89dae98621caa08caac7 Mon Sep 17 00:00:00 2001
+From: Linus Walleij <linusw@kernel.org>
+Date: Fri, 6 Nov 2026 00:44:02 +0100
+Subject: [PATCH] dt-bindings: serial: brcm,bcm6345-uart: Add power-domains
+
+The BCM6846 UART controller is powered by the PMB peripheral
+domain. Allow one optional power domain so the SoC device tree can
+describe this dependency.
+
+---
+--- a/Documentation/devicetree/bindings/serial/brcm,bcm6345-uart.yaml
++++ b/Documentation/devicetree/bindings/serial/brcm,bcm6345-uart.yaml
+@@ -16,6 +16,9 @@ properties:
+   compatible:
+     const: brcm,bcm6345-uart
+ 
++  power-domains:
++    maxItems: 1
++
+   reg:
+     maxItems: 1
+ 
