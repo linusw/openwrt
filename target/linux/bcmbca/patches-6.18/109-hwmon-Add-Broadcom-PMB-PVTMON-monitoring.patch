@@ -1,4 +1,4 @@
-From 04907634d018e36baa0cbd8016c741a2025100d4 Mon Sep 17 00:00:00 2001
+From 29ce7243cacb96d3eb831881c920f1e46dc736db Mon Sep 17 00:00:00 2001
 From: Linus Walleij <linusw@kernel.org>
 Date: Mon, 19 Oct 2026 15:44:32 +0200
 Subject: [PATCH] hwmon: Add Broadcom PMB PVTMON monitoring

@@ -1,4 +1,4 @@
-From 372ec308e4e6a8b11728b68fc0e8c1ec54b0ba5d Mon Sep 17 00:00:00 2001
+From da3dffb1f27cfd0147f60c0c4f81d4db3795b812 Mon Sep 17 00:00:00 2001
 From: Linus Walleij <linusw@kernel.org>
 Date: Tue, 20 Oct 2026 11:56:15 +0200
 Subject: [PATCH] ARM: dts: broadcom: Describe the BCM6846 XRDP Ethernet

@@ -1,4 +1,4 @@
-From 509383f36978051aa166706b719f451c0370fff5 Mon Sep 17 00:00:00 2001
+From 0c67d076e8d5cc15992e66bce5add67d59523937 Mon Sep 17 00:00:00 2001
 From: Linus Walleij <linusw@kernel.org>
 Date: Tue, 13 Oct 2026 19:05:50 +0200
 Subject: [PATCH] net: broadcom: Add KUnit tests for BCMBCA XRDP Ethernet

@@ -1,4 +1,4 @@
-From 8b0fad44c189da8bb39f5afbaf4d1dc6829b8c94 Mon Sep 17 00:00:00 2001
+From 46488f6872a7ea527bedb4719ec251f0b24da2d5 Mon Sep 17 00:00:00 2001
 From: Linus Walleij <linusw@kernel.org>
 Date: Tue, 13 Oct 2026 11:46:35 +0200
 Subject: [PATCH] net: broadcom: Add BCMBCA reduced XRDP Ethernet support

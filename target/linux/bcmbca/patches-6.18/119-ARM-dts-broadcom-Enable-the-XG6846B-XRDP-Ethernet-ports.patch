@@ -1,4 +1,4 @@
-From a3e3e1bab7351d6c9e7f890ba3705b0bb1ae3457 Mon Sep 17 00:00:00 2001
+From 0aaeb1708fe5670f95e50dfa7f308d47d40afba3 Mon Sep 17 00:00:00 2001
 From: Linus Walleij <linusw@kernel.org>
 Date: Tue, 13 Oct 2026 11:46:36 +0200
 Subject: [PATCH] ARM: dts: broadcom: Enable the XG6846B XRDP Ethernet ports
@@ -14,7 +14,7 @@ Signed-off-by: Linus Walleij <linusw@kernel.org>
 
 ---
 diff --git a/arch/arm/boot/dts/broadcom/bcm6846-genexis-xg6846b.dts b/arch/arm/boot/dts/broadcom/bcm6846-genexis-xg6846b.dts
-index 03aec380f516..73f688bbfa2a 100644
+index 27fc37746b3f..78308a9e0ed8 100644
 --- a/arch/arm/boot/dts/broadcom/bcm6846-genexis-xg6846b.dts
 +++ b/arch/arm/boot/dts/broadcom/bcm6846-genexis-xg6846b.dts
 @@ -74,6 +74,45 @@

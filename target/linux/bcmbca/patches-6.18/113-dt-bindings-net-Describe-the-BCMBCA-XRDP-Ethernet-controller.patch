@@ -1,4 +1,4 @@
-From c1e623d65e4f50293ddabeb9d570e5b706c9c4fb Mon Sep 17 00:00:00 2001
+From 4c88aa3e703349605095342ef224c03cd958b17b Mon Sep 17 00:00:00 2001
 From: Linus Walleij <linusw@kernel.org>
 Date: Tue, 13 Oct 2026 11:46:35 +0200
 Subject: [PATCH] dt-bindings: net: Describe the BCMBCA XRDP Ethernet

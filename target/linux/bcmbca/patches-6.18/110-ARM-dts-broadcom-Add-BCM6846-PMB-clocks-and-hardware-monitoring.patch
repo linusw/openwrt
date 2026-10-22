@@ -1,4 +1,4 @@
-From 4ac88be9d9c736342d369e14c2f8982afc086fb9 Mon Sep 17 00:00:00 2001
+From 8b5138846d2926eedcc9fd112367fd401b0697d0 Mon Sep 17 00:00:00 2001
 From: Linus Walleij <linusw@kernel.org>
 Date: Mon, 19 Oct 2026 15:44:32 +0200
 Subject: [PATCH] ARM: dts: broadcom: Add BCM6846 PMB clocks and hardware

@@ -1,14 +1,15 @@
-From 05537ff9f5906d88548a464948d407aced25ff28 Mon Sep 17 00:00:00 2001
+From 3d550e1904c897e3fbf0cfa35dd08a91afde37da Mon Sep 17 00:00:00 2001
 From: Linus Walleij <linusw@kernel.org>
 Date: Mon, 12 Oct 2026 00:24:45 +0200
-Subject: [PATCH] ARM: bcm: Add CFE SMP support for the Genexis XG6846B
+Subject: [PATCH] ARM: bcm: Add CFE SMP support for BCMBCA
 
 The XG6846B CFE bootloader powers up CPU1 and leaves it in a holding pen
 waiting for an interrupt. After waking, the stub reads the GPIO
 GeneralPurpose register at 0xff800568 and branches to the stored address
 in ARM state. The vendor kernel uses this mailbox and a wakeup IPI.
 
-Add a machine SMP fallback for the XG6846B when PSCI is unavailable.
+Implement the brcm,bca-smp CPU enable-method for BCMBCA systems
+booted through CFE.
 Read the mailbox address from the secondary CPU's cpu-release-addr
 property. Map it as device memory, write secondary_startup_arm and
 complete the write before sending the wakeup IPI. CPU1 is already
@@ -16,12 +17,12 @@ running, so no power or reset sequence is needed. Using the ARM entry
 also supports kernels built in Thumb-2 mode. Clear any Thumb function
 pointer tag before programming this ARM entry address.
 
-Build the BCMBCA machine description independently of DEBUG_BCMBCA,
-keeping the debug UART mapping conditional. Restrict the fallback to
-the XG6846B and retain the generic PSCI path when firmware provides it.
+Register the operations with CPU_METHOD_OF_DECLARE() so the CPU
+nodes select CFE bring-up explicitly. Build the BCMBCA machine
+description independently of DEBUG_BCMBCA, keeping the debug UART
+mapping conditional. The generic ARM startup code retains PSCI priority.
 
 Suggested-by: William Zhang <william.zhang@broadcom.com>
-Assisted-by: LLM
 Signed-off-by: Linus Walleij <linusw@kernel.org>
 
 ---
@@ -38,10 +39,10 @@ index 6baedf4c6304..fcc4e0174adc 100644
  obj-$(CONFIG_SMP)		+= bcm63xx_smp.o bcm63xx_pmb.o
  endif
 diff --git a/arch/arm/mach-bcm/board_bcmbca.c b/arch/arm/mach-bcm/board_bcmbca.c
-index b510d959870a..1c2e3ce71a82 100644
+index b510d959870a..248b8bd77645 100644
 --- a/arch/arm/mach-bcm/board_bcmbca.c
 +++ b/arch/arm/mach-bcm/board_bcmbca.c
-@@ -1,9 +1,16 @@
+@@ -1,9 +1,15 @@
  // SPDX-License-Identifier: GPL-2.0-only
  // Copyright (C) 2024 Linus Walleij <linus.walleij@linaro.org>
  
@@ -51,14 +52,13 @@ index b510d959870a..1c2e3ce71a82 100644
 +
  #include <asm/mach/arch.h>
  #include <asm/mach/map.h>
-+#include <asm/psci.h>
 +#include <asm/smp_plat.h>
  
 +#ifdef CONFIG_DEBUG_BCMBCA
  /* This is needed for LL-debug/earlyprintk/debug-macro.S */
  static struct map_desc bcmbca_io_desc[] __initdata = {
  	{
-@@ -13,11 +20,68 @@ static struct map_desc bcmbca_io_desc[] __initdata = {
+@@ -13,12 +19,62 @@ static struct map_desc bcmbca_io_desc[] __initdata = {
  		.type = MT_DEVICE,
  	},
  };
@@ -69,10 +69,10 @@ index b510d959870a..1c2e3ce71a82 100644
 +#ifdef CONFIG_DEBUG_BCMBCA
  	iotable_init(bcmbca_io_desc, ARRAY_SIZE(bcmbca_io_desc));
 +#endif
-+}
-+
+ }
+ 
 +#ifdef CONFIG_SMP
-+static int bcm6846_boot_secondary(unsigned int cpu, struct task_struct *idle)
++static int bcmbca_boot_secondary(unsigned int cpu, struct task_struct *idle)
 +{
 +	struct device_node *np;
 +	void __iomem *mailbox;
@@ -111,26 +111,13 @@ index b510d959870a..1c2e3ce71a82 100644
 +	return 0;
 +}
 +
-+static const struct smp_operations bcm6846_smp_ops __initconst = {
-+	.smp_boot_secondary = bcm6846_boot_secondary,
++static const struct smp_operations bcmbca_smp_ops __initconst = {
++	.smp_boot_secondary = bcmbca_boot_secondary,
 +};
 +
-+static bool __init bcm6846_smp_init(void)
-+{
-+	if (!of_machine_is_compatible("genexis,xg6846b") || psci_smp_available())
-+		return false;
-+
-+	smp_set_ops(&bcm6846_smp_ops);
-+	return true;
- }
++CPU_METHOD_OF_DECLARE(bcmbca_smp, "brcm,bca-smp", &bcmbca_smp_ops);
 +#endif
- 
++
  static const char * const bcmbca_dt_compat[] = {
  	/* TODO: Add other BCMBCA SoCs here to get debug UART support */
-@@ -27,5 +91,6 @@ static const char * const bcmbca_dt_compat[] = {
- 
- DT_MACHINE_START(BCMBCA_DT, "BCMBCA Broadband Access Processors")
- 	.map_io = bcmbca_map_io,
-+	.smp_init = smp_init_ops(bcm6846_smp_init),
- 	.dt_compat = bcmbca_dt_compat,
- MACHINE_END
+ 	"brcm,bcm6846",

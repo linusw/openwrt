@@ -1,4 +1,4 @@
-From 740e1a26583a2f219bea8763b36b023c1f6804e7 Mon Sep 17 00:00:00 2001
+From c8b1265a8c7962d2ab4bd3e5dd6d6d38000d775c Mon Sep 17 00:00:00 2001
 From: Linus Walleij <linusw@kernel.org>
 Date: Mon, 19 Oct 2026 16:33:28 +0200
 Subject: [PATCH] clk: bcm: Add BCMBCA PMB clocks

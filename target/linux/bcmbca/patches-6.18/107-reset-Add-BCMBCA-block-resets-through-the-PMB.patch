@@ -1,4 +1,4 @@
-From 436e254aa570be8623b3131a76f94cbf2d3f456f Mon Sep 17 00:00:00 2001
+From 4c7ae2fbda5a272281bb13b70f64d9be19cd20f3 Mon Sep 17 00:00:00 2001
 From: Linus Walleij <linusw@kernel.org>
 Date: Tue, 13 Oct 2026 11:46:34 +0200
 Subject: [PATCH] reset: Add BCMBCA block resets through the PMB

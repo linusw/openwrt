@@ -1,4 +1,4 @@
-From be5229b2a8801b232dd53f5347a120d602fa473e Mon Sep 17 00:00:00 2001
+From f2faec3d2c72fb981520b419d409eaddd07bf051 Mon Sep 17 00:00:00 2001
 From: Linus Walleij <linusw@kernel.org>
 Date: Tue, 13 Oct 2026 22:09:44 +0200
 Subject: [PATCH] mfd: Add a shared BCMBCA PMC3 PMB transport

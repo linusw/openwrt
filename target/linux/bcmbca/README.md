@@ -2,7 +2,7 @@
 
 This target uses the BCM6846 CFE SMP, PMC/PMB and reduced XRDP Ethernet
 series from `linux-integrator`, branch `b4/genexis-xg6846b-ethernet`, through
-commit `dee68577fdae`, based on v7.3-rc1 and rebased onto Linux 6.18.55.
+commit `b00f3b715cdb`, based on v7.3-rc1 and rebased onto Linux 6.18.55.
 This includes the shared MFD PMB transport, reset and clock providers,
 PVTMON temperature/voltage monitoring, watchdog restart support, and the
 Broadcom internal PHY driver. The BCM6846 I2C node is also backported. The Ethernet
@@ -16,6 +16,11 @@ in the switch/SFP patch.
 The previously tested XRDP power-up, PHY block power and RTNL fixes are now
 part of the consolidated driver patches. The OpenWrt flash layout and
 console-preserving UART shutdown patch remain separate.
+
+The CFE SMP prerequisites use the explicit `brcm,bca-smp` CPU enable
+method and include its binding. CPU1's `cpu-release-addr` still points to
+the CFE mailbox at `0xff800568`. The board SMP patch also preserves the
+holding pen by removing `no-map` from its reservation.
 
 The PMB clock driver uses distinct RDP and BIU PLL register layouts and
 checks their hardware lock indication without interpreting firmware-owned

@@ -1,0 +1,75 @@
+From 09ea125694785e5d016fc50fc951f0c40552e131 Mon Sep 17 00:00:00 2001
+From: Linus Walleij <linusw@kernel.org>
+Date: Wed, 21 Oct 2026 15:28:21 +0200
+Subject: [PATCH] dt-bindings: arm: cpus: Add brcm,bca-smp enable method
+
+BCMBCA systems booted through CFE can release a secondary CPU by
+writing its ARM-state entry address to a 32-bit MMIO mailbox and
+sending a wakeup interrupt.
+
+Document brcm,bca-smp and its single-cell cpu-release-addr property.
+The boot CPU does not need a mailbox; secondary CPUs do. Add a
+Cortex-A7 example showing both CPU nodes.
+
+Signed-off-by: Linus Walleij <linusw@kernel.org>
+
+---
+diff --git a/Documentation/devicetree/bindings/arm/cpus.yaml b/Documentation/devicetree/bindings/arm/cpus.yaml
+index 736b7ab1bd0a..7d714967c405 100644
+--- a/Documentation/devicetree/bindings/arm/cpus.yaml
++++ b/Documentation/devicetree/bindings/arm/cpus.yaml
+@@ -241,6 +241,7 @@ properties:
+           - amlogic,meson8b-smp
+           - arm,realview-smp
+           - aspeed,ast2600-smp
++          - brcm,bca-smp
+           - brcm,bcm11351-cpu-method
+           - brcm,bcm23550
+           - brcm,bcm2836-smp
+@@ -457,6 +458,20 @@ allOf:
+     then:
+       required:
+         - secondary-boot-reg
++  - if:
++      properties:
++        enable-method:
++          const: brcm,bca-smp
++      required:
++        - enable-method
++    then:
++      properties:
++        cpu-release-addr:
++          $ref: /schemas/types.yaml#/definitions/uint32
++          description:
++            Physical address of the 32-bit MMIO mailbox read by CFE after
++            a wakeup interrupt. Required on secondary CPUs. The kernel
++            writes the ARM-state entry address before sending the interrupt.
+   - if:
+       properties:
+         enable-method:
+@@ -698,4 +713,25 @@ examples:
+         cpu-release-addr = <0 0x20000000>;
+       };
+     };
++  - |
++    // Example 5 (Broadcom BCMBCA with CFE):
++    cpus {
++      #size-cells = <0>;
++      #address-cells = <1>;
++
++      cpu@0 {
++        device_type = "cpu";
++        compatible = "arm,cortex-a7";
++        reg = <0>;
++        enable-method = "brcm,bca-smp";
++      };
++
++      cpu@1 {
++        device_type = "cpu";
++        compatible = "arm,cortex-a7";
++        reg = <1>;
++        enable-method = "brcm,bca-smp";
++        cpu-release-addr = <0xff800568>;
++      };
++    };
+ ...

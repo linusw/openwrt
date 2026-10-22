@@ -1,4 +1,4 @@
-From 2ce0299c5b2bd0b9d3199008c4af9ca4c9d2849e Mon Sep 17 00:00:00 2001
+From 875c348d0c8a95357c299eedec5afde5f6d1f0a3 Mon Sep 17 00:00:00 2001
 From: Linus Walleij <linusw@kernel.org>
 Date: Tue, 13 Oct 2026 22:40:28 +0200
 Subject: [PATCH] dt-bindings: mfd: Describe the BCM6846 PMC complex

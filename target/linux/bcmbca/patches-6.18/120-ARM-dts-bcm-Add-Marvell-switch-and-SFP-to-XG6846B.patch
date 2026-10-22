@@ -1,4 +1,4 @@
-From dee68577fdae3cf0ef3722bcaf696ae10d2af211 Mon Sep 17 00:00:00 2001
+From b00f3b715cdbd5a88f39df8e9721cdd48ec2f245 Mon Sep 17 00:00:00 2001
 From: Linus Walleij <linusw@kernel.org>
 Date: Tue, 13 Oct 2026 11:46:36 +0200
 Subject: [PATCH] ARM: dts: bcm: Add Marvell switch and SFP to XG6846B
@@ -20,7 +20,7 @@ Signed-off-by: Linus Walleij <linusw@kernel.org>
 
 ---
 diff --git a/arch/arm/boot/dts/broadcom/bcm6846-genexis-xg6846b.dts b/arch/arm/boot/dts/broadcom/bcm6846-genexis-xg6846b.dts
-index 73f688bbfa2a..16e60d6ec73e 100644
+index 78308a9e0ed8..62b5bf083cd1 100644
 --- a/arch/arm/boot/dts/broadcom/bcm6846-genexis-xg6846b.dts
 +++ b/arch/arm/boot/dts/broadcom/bcm6846-genexis-xg6846b.dts
 @@ -54,6 +54,11 @@

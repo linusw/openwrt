@@ -1,4 +1,4 @@
-From 15c76da7f7ef1c988c705bb73957073007fb79b1 Mon Sep 17 00:00:00 2001
+From 868028869a0a3e5aa2c966da24ff770018ee65b7 Mon Sep 17 00:00:00 2001
 From: Linus Walleij <linusw@kernel.org>
 Date: Tue, 13 Oct 2026 22:09:44 +0200
 Subject: [PATCH] dt-bindings: soc: Describe the BCM6846 Processor Monitor Bus
